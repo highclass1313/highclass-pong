@@ -1,0 +1,1602 @@
+import { useState, useRef, useMemo } from "react";
+
+// ── Ranks ──────────────────────────────────────────────────────
+const RANKS = [
+  { name:"Rookie",    xp:0,    icon:"🥉", color:"#8B6914" },
+  { name:"Amateur",   xp:150,  icon:"🥈", color:"#9e9e9e" },
+  { name:"Semi-Pro",  xp:400,  icon:"🥇", color:"#DAA520" },
+  { name:"Pro",       xp:800,  icon:"💎", color:"#29B6F6" },
+  { name:"Elite",     xp:1500, icon:"🔥", color:"#FF7043" },
+  { name:"Legend",    xp:2500, icon:"⚡", color:"#BA68C8" },
+  { name:"HighClass", xp:8000, icon:"👑", color:"#F5C030" },
+];
+const getRankIdx = (xp) => {
+  for (let i = RANKS.length - 1; i >= 0; i--) if (xp >= RANKS[i].xp) return i;
+  return 0;
+};
+
+// ── Constants ──────────────────────────────────────────────────
+const STARTING_TOKENS = 50;
+const MATCH_BUYIN     = 5;
+const MATCH_PAYOUT    = 8;
+const TOURN_BUYIN     = 10;
+const TOURN_PAYOUT    = 60;
+const TOURN_HOUSE     = 20;
+const TOURN_NFT_WINS  = 3;
+const XP_WIN          = 60;
+const XP_CUP          = 5;
+const XP_BOUNCE       = 12;
+const XP_FIRE         = 10;
+const XP_FINGER_SAVE  = 15;
+const XP_FINGER_MISS  = -2.5;
+const HIT_R           = 5.5;
+const BOUNCE_HIT_R    = 6.5;
+const CPU_ACC         = 0.52;
+const RIM_CHANCE      = 0.18;
+const RIM_MS          = 2200;
+const CPU_FING        = 0.30;
+const MAX_RERACKS     = 2;
+const ISLAND_DIST     = 22;  // cups farther than this from all others = island
+const TOUCH_DIST      = 22;  // cups must be within this distance in re-rack
+
+// Circle of Death: sink the 3 corner cups + center cup = instant win
+// TOP_CUPS indices: 0=top-left, 3=top-right, 9=tip, 5=center
+const COD_CUPS = [0, 3, 5, 9];
+
+// ── Cup positions [x%, y%] full table ──────────────────────────
+const TOP_CUPS = [
+  [35,4],[45,4],[55,4],[65,4],
+  [40,11],[50,11],[60,11],
+  [45,18],[55,18],
+  [50,25],
+];
+const BOT_CUPS = [
+  [50,75],
+  [45,82],[55,82],
+  [40,89],[50,89],[60,89],
+  [35,96],[45,96],[55,96],[65,96],
+];
+
+// ── Leaderboard names ──────────────────────────────────────────
+const LB_NAMES = [
+  "RimKing","ShotCaller","BounceGod","CupSmasher","FlickMaster",
+  "TableLord","AlleyOop","DeepShot","RackAttack","CupSlayer",
+  "BeerPongPro","TopShelf","SplashBro","FingerKing","BounceBack",
+  "CupCrusher","HotStreak","ArcAngel","PongLegend","SinkOrSwim",
+  "RimRider","CenterLine","LiquidLuck","SteadyHand","NightShift",
+  "QuickFlick","BallHandler","CupKeeper","SplashZone","RackRuler",
+  "IceCold","FireShot","BeerMaster","TableTamer","AimBot",
+  "DeadEye","TipShot","BackSpin","GoldenArm","ColdStreak",
+  "HeatCheck","DoubleDown","CupStacker","FlickFast","ShotGlass",
+  "FullSend","BallDropper","SpinCycle","RimShaker","NailIt",
+  "TopRack","BottomOut","SideSwipe","CenterCup","LastCall",
+  "GameTime","ClutchShot","WildCard","DarkHorse","SilentBaller",
+  "PhantomFlick","GhostShot","IronWrist","LaserBeam","PongKing",
+  "TableTop","CupCollector","StreakBreaker","HeatSeeker","SplashDmg",
+  "CurveBall","DeepSix","RimRunner","QuickDraw","SteelWrist",
+  "ColdBlood","HotHands","NeonFlick","NightOwl","DawnShot",
+  "TwilightPong","MidnightRim","SunriseFlick","StormShot","RainMaker",
+  "WindFlick","ThunderPong","LightningRim","TempestCup","VortexShot",
+  "CycloneFlick","TyphoonBall","HurricaneRim","TornadoPong","MeteorFlick",
+  "CometShot","AsteroidRim","GalaxyPong","StarShot","NovaPong",
+];
+const buildLeaderboard = () =>
+  LB_NAMES.slice(0,99).map((name,i) => ({
+    name,
+    xp:   Math.max(0, Math.floor(8500 - i*82 - Math.random()*60)),
+    wins: Math.max(1, Math.floor(140  - i*1.3 - Math.random()*10)),
+    rank: getRankIdx(8500 - i*82),
+  }));
+
+// ════════════════════════════════════════════════════════════════
+//  AUDIO
+// ════════════════════════════════════════════════════════════════
+function sfx(type) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const tone = (f,w,st,d,v=0.22) => {
+      const o=ctx.createOscillator(), g=ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type=w; o.frequency.value=f;
+      g.gain.setValueAtTime(v,ctx.currentTime+st);
+      g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+st+d);
+      o.start(ctx.currentTime+st); o.stop(ctx.currentTime+st+d);
+    };
+    const noise = (st,d,v=0.12) => {
+      const buf=ctx.createBuffer(1,ctx.sampleRate*d,ctx.sampleRate);
+      const dat=buf.getChannelData(0);
+      for(let i=0;i<dat.length;i++) dat[i]=Math.random()*2-1;
+      const s=ctx.createBufferSource(), g=ctx.createGain(), fl=ctx.createBiquadFilter();
+      s.buffer=buf; fl.type="bandpass"; fl.frequency.value=700;
+      s.connect(fl); fl.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(v,ctx.currentTime+st);
+      g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+st+d);
+      s.start(ctx.currentTime+st); s.stop(ctx.currentTime+st+d);
+    };
+    if(type==="splash") { noise(0,.13,.28); tone(520,"sine",0,.07,.44); tone(260,"sine",.05,.25,.3); }
+    if(type==="bounce") { tone(290,"square",0,.09,.22); tone(170,"square",.07,.1,.15); noise(0,.06,.1); }
+    if(type==="rim")    { tone(680,"sine",0,.05,.5); tone(640,"sine",.04,.08,.4); tone(600,"sine",.08,.06,.3); }
+    if(type==="saved")  { tone(400,"sine",0,.06,.4); tone(500,"sine",.05,.08,.45); tone(640,"sine",.1,.1,.4); }
+    if(type==="heat")   { tone(660,"sine",0,.06,.2); tone(880,"sine",.05,.08,.2); }
+    if(type==="fire")   { tone(660,"sine",0,.08,.3); tone(880,"sine",.07,.1,.35); tone(1100,"sine",.15,.12,.3); }
+    if(type==="miss")   { tone(190,"sawtooth",0,.19,.13); }
+    if(type==="rankup") { [523,659,784,880,1047].forEach((f,i)=>tone(f,"sine",i*.1,.3,.24)); }
+    if(type==="coins")  { [800,1000,1200].forEach((f,i)=>tone(f,"sine",i*.08,.2,.28)); }
+    if(type==="win")    { [523,659,784,1047].forEach((f,i)=>tone(f,"sine",i*.13,.34,.22)); }
+    if(type==="lose")   { [370,270,180].forEach((f,i)=>tone(f,"sawtooth",i*.14,.3,.18)); }
+    if(type==="nft")    { [400,500,600,800,1000,1200].forEach((f,i)=>tone(f,"sine",i*.12,.4,.3)); }
+    setTimeout(()=>{ try{ctx.close();}catch(e){} }, 3500);
+  } catch(e) {}
+}
+
+// ════════════════════════════════════════════════════════════════
+//  SHARED COMPONENTS
+// ════════════════════════════════════════════════════════════════
+
+function XpBar({ xp, compact=false }) {
+  const ri=getRankIdx(xp), rank=RANKS[ri], next=RANKS[ri+1];
+  const pct=next ? Math.min(((xp-rank.xp)/(next.xp-rank.xp))*100,100) : 100;
+  return (
+    <div style={{width:"100%",maxWidth:340,marginBottom:compact?4:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:compact?8:9,letterSpacing:2,marginBottom:compact?3:5}}>
+        <span style={{color:rank.color}}>{rank.icon} {rank.name.toUpperCase()}</span>
+        <span style={{color:"#2a2a2a"}}>{xp.toLocaleString()} XP</span>
+      </div>
+      <div style={{height:compact?3:6,background:"rgba(255,255,255,0.05)",borderRadius:3,overflow:"hidden"}}>
+        <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg,${rank.color}88,${rank.color})`,transition:"width 1s",borderRadius:3}}/>
+      </div>
+    </div>
+  );
+}
+
+function TokenBadge({ tokens }) {
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 12px",background:"rgba(245,166,35,0.1)",border:"1px solid rgba(245,166,35,0.3)",borderRadius:20}}>
+      <span style={{fontSize:12}}>🪙</span>
+      <span style={{fontSize:11,fontWeight:900,color:"#f5a623",letterSpacing:1}}>{tokens}</span>
+    </div>
+  );
+}
+
+function Cup({ standing, splash, rimming, color, glow }) {
+  if (!standing && !rimming) {
+    return <div style={{width:28,height:4,borderRadius:"50%",background:"rgba(255,255,255,0.03)",border:"1px dashed rgba(255,255,255,0.06)",margin:"17px auto 0"}}/>;
+  }
+  return (
+    <div style={{position:"relative",width:28,height:38}}>
+      {rimming && (
+        <div style={{position:"absolute",top:-16,left:"50%",transform:"translateX(-50%)",fontSize:7,color:"gold",whiteSpace:"nowrap",animation:"rimPulse .35s ease-in-out infinite alternate"}}>😮</div>
+      )}
+      <div style={{position:"absolute",inset:0,clipPath:"polygon(3% 0%,97% 0%,80% 100%,20% 100%)",background:`linear-gradient(112deg,rgba(255,255,255,0.28) 0%,${color} 22%,${color} 70%,rgba(0,0,0,0.42) 100%)`,overflow:"hidden",boxShadow:rimming?"0 0 22px 8px gold,0 0 44px goldenrod":splash?`0 0 24px 10px ${glow},0 0 48px ${glow}88`:"none",animation:rimming?"rimPulse .35s ease-in-out infinite alternate":"none"}}>
+        <div style={{position:"absolute",top:0,left:0,right:0,height:4,background:"rgba(255,255,255,0.78)"}}/>
+        <div style={{position:"absolute",top:4,left:"8%",right:"8%",height:7,background:"rgba(195,155,20,0.28)",borderRadius:"0 0 50% 50%"}}/>
+        {[28,50,70].map(p => <div key={p} style={{position:"absolute",top:`${p}%`,left:0,right:0,height:1.5,background:"rgba(0,0,0,0.18)"}}/>)}
+        <div style={{position:"absolute",top:"8%",left:"5%",width:"9%",bottom:"8%",background:"rgba(255,255,255,0.18)",borderRadius:2}}/>
+      </div>
+      <div style={{position:"absolute",bottom:-5,left:"15%",right:"15%",height:4,borderRadius:"50%",background:"rgba(0,0,0,0.5)",filter:"blur(3px)"}}/>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  RE-RACK PICKER
+//  Tap a cup to select it (glows gold), then tap anywhere
+//  in the zone to place it. Repeat for each cup. Confirm when done.
+// ════════════════════════════════════════════════════════════════
+function ReRackPicker({ side, cupStanding, cupPositions, onConfirm, onCancel }) {
+  const tableRef = useRef(null);
+
+  // Rack zone bounds in full-table %
+  const ZONE = side === "top"
+    ? { x1:8, x2:92, y1:2,  y2:44 }
+    : { x1:8, x2:92, y1:56, y2:98 };
+
+  const toMini = (fx, fy) => ({
+    x: Math.max(4, Math.min(96, ((fx - ZONE.x1) / (ZONE.x2 - ZONE.x1)) * 100)),
+    y: Math.max(4, Math.min(96, ((fy - ZONE.y1) / (ZONE.y2 - ZONE.y1)) * 100)),
+  });
+
+  const toFull = (mx, my) => [
+    Math.round(10 * (ZONE.x1 + (mx / 100) * (ZONE.x2 - ZONE.x1))) / 10,
+    Math.round(10 * (ZONE.y1 + (my / 100) * (ZONE.y2 - ZONE.y1))) / 10,
+  ];
+
+  // Initial cup positions in mini %
+  const initPositions = () => {
+    const pos = {};
+    cupStanding.forEach((standing, i) => {
+      if (!standing) return;
+      pos[i] = toMini(cupPositions[i][0], cupPositions[i][1]);
+    });
+    return pos;
+  };
+
+  const [positions, setPositions] = useState(initPositions);
+  const [selected,  setSelected]  = useState(null); // cupIdx currently selected
+
+  const standingIdxs = Object.keys(positions).map(Number);
+
+  const getZonePct = (e) => {
+    const r = tableRef.current?.getBoundingClientRect();
+    if (!r) return null;
+    return {
+      x: Math.max(4, Math.min(96, ((e.clientX - r.left) / r.width)  * 100)),
+      y: Math.max(4, Math.min(96, ((e.clientY - r.top)  / r.height) * 100)),
+    };
+  };
+
+  // Tap on the zone background → move selected cup here
+  const handleZoneTap = (e) => {
+    if (selected === null) return;
+    const p = getZonePct(e);
+    if (!p) return;
+    setPositions(prev => ({ ...prev, [selected]: p }));
+    setSelected(null);
+  };
+
+  // Tap on a cup → select it (or deselect if already selected)
+  const handleCupTap = (e, cupIdx) => {
+    e.stopPropagation();
+    setSelected(prev => prev === cupIdx ? null : cupIdx);
+  };
+
+  const [backError,   setBackError]   = useState(false);
+
+  // "Back" of table in mini % — top rack: y near 0%, bot rack: y near 100%
+  const BACK_THRESHOLD = 22;
+
+  const cupAtBack = () =>
+    Object.values(positions).some(({ y }) =>
+      side === "top" ? y <= 50 : y >= 50  // generous — just needs to be in the right half
+    );
+
+  const handleConfirm = () => {
+    if (!cupAtBack()) {
+      setBackError(true);
+      setTimeout(() => setBackError(false), 2000);
+      return;
+    }
+    const newPos = cupPositions.map(p => [...p]);
+    Object.entries(positions).forEach(([cupIdx, { x, y }]) => {
+      newPos[Number(cupIdx)] = toFull(x, y);
+    });
+    onConfirm(newPos);
+  };
+
+  const isBlue = side === "top";
+  const cupColor = isBlue ? "#1455c0" : "#cc2020";
+  const cupBorder = isBlue ? "#4488ff" : "#ff6666";
+
+  return (
+    <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)", color:"#fff", fontFamily:"'Courier New',monospace", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"24px 16px", userSelect:"none" }}>
+
+      <div style={{ fontSize:10, fontWeight:900, letterSpacing:4, background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:8 }}>
+        🔄 RE-RACK
+      </div>
+
+      {/* Instruction — changes based on state */}
+      <div style={{ fontSize:11, fontWeight:900, letterSpacing:2, marginBottom:4, color: selected !== null ? "#f5a623" : "#aaa", minHeight:18, textAlign:"center" }}>
+        {selected !== null
+          ? "👆 Now tap where you want it"
+          : "👆 Tap a cup to select it"}
+      </div>
+      <div style={{ fontSize:8, color:"#1e1e1e", letterSpacing:2, marginBottom:16 }}>
+        Arrange cups how you want — then confirm
+      </div>
+
+      {/* Validation messages */}
+      <div style={{ width:320, marginBottom:6, fontSize:8, letterSpacing:2, textAlign:"center", fontWeight:900, minHeight:14, color: backError ? "#e74c3c" : "#1e1e1e", transition:"color .2s" }}>
+        {backError ? "❌ At least 1 cup must be near the back wall!" : "Arrange your cups then tap CONFIRM"}
+      </div>
+
+      {/* Zone */}
+      <div
+        ref={tableRef}
+        onClick={handleZoneTap}
+        style={{
+          position:"relative", width:320, height:280,
+          background: selected !== null
+            ? "linear-gradient(180deg,#0a2a0a,#1a3a1a)"
+            : "linear-gradient(180deg,#0a1f0a,#143014)",
+          borderRadius:16,
+          border:`2px solid ${backError ? "#e74c3c" : selected !== null ? "#f5a623" : "#27ae60"}`,
+          marginBottom:14,
+          overflow:"hidden",
+          transition:"border-color .2s, background .2s",
+          cursor: selected !== null ? "crosshair" : "default",
+        }}
+      >
+        {/* Back wall highlight strip */}
+        <div style={{
+          position:"absolute",
+          ...(side === "top"
+            ? { top:0, left:0, right:0, height:`${BACK_THRESHOLD}%` }
+            : { bottom:0, left:0, right:0, height:`${BACK_THRESHOLD}%` }),
+          background: backError
+            ? "rgba(231,76,60,0.12)"
+            : "rgba(39,174,96,0.07)",
+          borderBottom: side === "top" ? "1px dashed rgba(39,174,96,0.3)" : "none",
+          borderTop:    side === "bot" ? "1px dashed rgba(39,174,96,0.3)" : "none",
+          pointerEvents:"none",
+          transition:"background .2s",
+        }}/>
+        <div style={{
+          position:"absolute",
+          ...(side === "top" ? { top:4 } : { bottom:4 }),
+          left:"50%", transform:"translateX(-50%)",
+          fontSize:7, color:"rgba(39,174,96,0.5)", letterSpacing:2,
+          pointerEvents:"none", whiteSpace:"nowrap",
+        }}>
+          ← BACK WALL →
+        </div>
+        {/* Grid */}
+        {[25,50,75].map(p => (
+          <div key={`v${p}`} style={{ position:"absolute", left:`${p}%`, top:0, bottom:0, width:1, background:"rgba(255,255,255,0.05)", pointerEvents:"none" }}/>
+        ))}
+        {[33,66].map(p => (
+          <div key={`h${p}`} style={{ position:"absolute", top:`${p}%`, left:0, right:0, height:1, background:"rgba(255,255,255,0.05)", pointerEvents:"none" }}/>
+        ))}
+
+        {/* Target crosshair hint when cup is selected */}
+        {selected !== null && (
+          <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none" }}>
+            <div style={{ fontSize:10, color:"rgba(245,166,35,0.25)", letterSpacing:3 }}>TAP TO PLACE</div>
+          </div>
+        )}
+
+        {/* Cups */}
+        {standingIdxs.map(cupIdx => {
+          const { x, y } = positions[cupIdx];
+          const isSel     = selected === cupIdx;
+          return (
+            <div
+              key={cupIdx}
+              onClick={(e) => handleCupTap(e, cupIdx)}
+              style={{
+                position:"absolute",
+                left:`${x}%`,
+                top:`${y}%`,
+                transform:"translate(-50%,-50%)",
+                width:46,
+                height:46,
+                borderRadius:"50%",
+                background: isSel
+                  ? "linear-gradient(135deg,#f5c030,#a05e06)"
+                  : `linear-gradient(135deg,${cupColor}dd,${cupColor}88)`,
+                border:`3px solid ${isSel ? "gold" : cupBorder}`,
+                display:"flex",
+                alignItems:"center",
+                justifyContent:"center",
+                fontSize:22,
+                cursor:"pointer",
+                zIndex: isSel ? 20 : 10,
+                boxShadow: isSel
+                  ? "0 0 28px rgba(255,215,0,1), 0 0 50px rgba(255,215,0,0.5)"
+                  : `0 0 12px ${cupBorder}88`,
+                transition:"all .15s",
+                animation: isSel ? "heatPulse .4s ease-in-out infinite alternate" : "none",
+              }}
+            >
+              🍺
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display:"flex", gap:12, width:"100%", maxWidth:320 }}>
+        <button
+          onClick={handleConfirm}
+          style={{ flex:1, padding:"16px 0", background:"linear-gradient(135deg,#27ae60,#1a6e3c)", border:"none", borderRadius:12, color:"#fff", fontWeight:900, fontSize:13, letterSpacing:3, cursor:"pointer", fontFamily:"'Courier New',monospace" }}
+        >
+          ✅ CONFIRM
+        </button>
+        <button
+          onClick={onCancel}
+          style={{ padding:"16px 20px", background:"none", border:"1px solid #1c1c1c", borderRadius:12, color:"#2e2e2e", fontSize:11, letterSpacing:2, cursor:"pointer", fontFamily:"'Courier New',monospace" }}
+        >
+          ✕
+        </button>
+      </div>
+
+      <div style={{ marginTop:12, fontSize:8, color:"#1e1e1e", letterSpacing:2, textAlign:"center" }}>
+        Tap cup → tap destination → repeat → confirm
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  PASS SCREEN (multiplayer turn transitions)
+// ════════════════════════════════════════════════════════════════
+function PassScreen({ turn, onReady }) {
+  const color = turn===1 ? "#cc2020" : "#1455c0";
+  const bg    = turn===1 ? "linear-gradient(135deg,#cc2020,#7a0f0f)" : "linear-gradient(135deg,#1e6fd4,#0b3480)";
+  return (
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,gap:16,textAlign:"center"}}>
+      <div style={{fontSize:48}}>📱</div>
+      <div style={{fontSize:11,color:"#1e1e1e",letterSpacing:4}}>PASS THE PHONE TO</div>
+      <div style={{fontSize:32,fontWeight:900,letterSpacing:4,color,textShadow:`0 0 20px ${color}`}}>{turn===1?"P1 🔴":"P2 🔵"}</div>
+      <div style={{fontSize:9,color:"#2a2a2a",letterSpacing:2}}>{turn===1?"Flick UP toward opponent":"Flick DOWN toward opponent"}</div>
+      <button onPointerDown={onReady} style={{marginTop:20,padding:"16px 40px",background:bg,border:"none",borderRadius:12,color:"#fff",fontWeight:900,fontSize:14,letterSpacing:4,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>✅ READY</button>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  STATS SCREEN
+// ════════════════════════════════════════════════════════════════
+function StatsScreen({ stats, xp, tokens, tournWins, leaderboard, onBack }) {
+  const [tab, setTab] = useState("stats");
+  const ri=getRankIdx(xp), rank=RANKS[ri];
+  const cupPct    = stats.cupsAttempted>0 ? ((stats.cupsMade/stats.cupsAttempted)*100).toFixed(1) : "0.0";
+  const fingerPct = stats.fingerAttempts>0 ? ((stats.fingerSaves/stats.fingerAttempts)*100).toFixed(1) : "0.0";
+
+  const board = useMemo(() => {
+    const me    = {name:"YOU ⭐",xp,wins:stats.wins,rank:ri,isMe:true};
+    const above = leaderboard.filter(p=>p.xp>xp);
+    const below = leaderboard.filter(p=>p.xp<=xp);
+    return [...above,me,...below].slice(0,100);
+  }, [xp,stats.wins,leaderboard,ri]);
+  const myPos = board.findIndex(p=>p.isMe)+1;
+
+  const SR = ({label,value,sub}) => (
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,marginBottom:7}}>
+      <div>
+        <div style={{fontSize:10,color:"#2a2a2a",letterSpacing:2}}>{label}</div>
+        {sub&&<div style={{fontSize:8,color:"#1a1a1a",letterSpacing:1,marginTop:2}}>{sub}</div>}
+      </div>
+      <div style={{fontSize:18,fontWeight:900,color:"#f5a623"}}>{value}</div>
+    </div>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",padding:"14px 12px 28px"}}>
+      <div style={{display:"flex",alignItems:"center",width:"100%",maxWidth:350,marginBottom:12}}>
+        <button onPointerDown={onBack} style={{background:"none",border:"1px solid #1c1c1c",color:"#2e2e2e",borderRadius:6,padding:"4px 9px",fontSize:9,letterSpacing:2,cursor:"pointer"}}>← BACK</button>
+        <div style={{flex:1,textAlign:"center",fontSize:10,fontWeight:900,letterSpacing:4,background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>HIGHCLASS 🍺 PONG</div>
+        <div style={{fontSize:10,color:rank.color}}>{rank.icon}</div>
+      </div>
+      <XpBar xp={xp}/>
+      <div style={{fontSize:10,color:"#f5a623",letterSpacing:2,marginBottom:10}}>{tokens}🪙 tokens</div>
+      <div style={{display:"flex",width:"100%",maxWidth:350,marginBottom:14,background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:10,overflow:"hidden"}}>
+        {["stats","leaderboard"].map(t => (
+          <button key={t} onPointerDown={()=>setTab(t)} style={{flex:1,padding:"10px 0",background:tab===t?"rgba(245,166,35,0.14)":"none",border:"none",borderRight:t==="stats"?"1px solid rgba(255,255,255,0.06)":"none",color:tab===t?"#f5a623":"#2a2a2a",fontWeight:tab===t?900:400,fontSize:9,letterSpacing:3,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>
+            {t==="stats"?"📊 STATS":"🏆 LEADERBOARD"}
+          </button>
+        ))}
+      </div>
+
+      {tab==="stats" && (
+        <div style={{width:"100%",maxWidth:350}}>
+          <div style={{fontSize:8,color:"#1e1e1e",letterSpacing:4,marginBottom:8}}>── RECORD ──</div>
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            {[{l:"WINS",v:stats.wins,c:"#27ae60"},{l:"LOSSES",v:stats.losses,c:"#e74c3c"},{l:"TOURN WINS",v:tournWins||0,c:"#f5a623"}].map(s => (
+              <div key={s.l} style={{flex:1,padding:"10px 0",textAlign:"center",background:"rgba(255,255,255,0.02)",border:`1px solid ${s.c}22`,borderRadius:8}}>
+                <div style={{fontSize:22,fontWeight:900,color:s.c}}>{s.v}</div>
+                <div style={{fontSize:7,color:"#1a1a1a",letterSpacing:2,marginTop:2}}>{s.l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:8,color:"#1e1e1e",letterSpacing:4,marginBottom:8}}>── SHOOTING ──</div>
+          <SR label="Cups Made %" value={`${cupPct}%`} sub={`${stats.cupsMade} made / ${stats.cupsAttempted} shots`}/>
+          <SR label="Total Cups Sunk" value={stats.cupsMade} sub="all games combined"/>
+          <SR label="Bounce Shots" value={stats.bouncesMade} sub="successful bounces (×2 cups)"/>
+          <SR label="On Fire Streaks" value={stats.fireStreaks} sub="3+ makes in a row"/>
+          <div style={{fontSize:8,color:"#1e1e1e",letterSpacing:4,marginBottom:8,marginTop:14}}>── FINGER STATS ──</div>
+          <div style={{display:"flex",gap:8,marginBottom:7}}>
+            {[
+              {l:"ATTEMPTS 🫵",v:stats.fingerAttempts,c:"gold",bg:"rgba(255,215,0,0.05)",b:"rgba(255,215,0,0.2)"},
+              {l:"SAVED ✅",v:stats.fingerSaves,c:"#27ae60",bg:"rgba(39,174,96,0.05)",b:"rgba(39,174,96,0.2)"},
+              {l:"MISSED ❌",v:stats.fingerMisses,c:"#e74c3c",bg:"rgba(231,76,60,0.05)",b:"rgba(231,76,60,0.2)"},
+            ].map(s => (
+              <div key={s.l} style={{flex:1,padding:"10px 0",textAlign:"center",background:s.bg,border:`1px solid ${s.b}`,borderRadius:8}}>
+                <div style={{fontSize:22,fontWeight:900,color:s.c}}>{s.v}</div>
+                <div style={{fontSize:7,color:"#1a1a1a",letterSpacing:1,marginTop:2}}>{s.l}</div>
+              </div>
+            ))}
+          </div>
+          <SR label="Finger Save %" value={`${fingerPct}%`} sub="saves out of total attempts"/>
+          <div style={{fontSize:8,color:"#e74c3c55",textAlign:"center",marginTop:4}}>Missed finger attempt = -2.5 XP</div>
+        </div>
+      )}
+
+      {tab==="leaderboard" && (
+        <div style={{width:"100%",maxWidth:350}}>
+          <div style={{fontSize:8,color:"#1e1e1e",letterSpacing:3,textAlign:"center",marginBottom:10}}>
+            YOUR POSITION: <span style={{color:"#f5a623",fontWeight:900}}>#{myPos}</span> OF {board.length}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:5,maxHeight:520,overflowY:"auto"}}>
+            {board.map((p,i) => {
+              const pr=RANKS[p.rank];
+              return (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:p.isMe?"rgba(245,166,35,0.12)":"rgba(255,255,255,0.02)",border:`1px solid ${p.isMe?"#f5a62355":"rgba(255,255,255,0.05)"}`,borderRadius:8}}>
+                  <div style={{fontSize:11,fontWeight:900,color:i<3?"#f5a623":"#2a2a2a",minWidth:24}}>#{i+1}</div>
+                  <div style={{fontSize:11}}>{pr.icon}</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:p.isMe?"#f5a623":"#3a3a3a",fontWeight:p.isMe?900:400,letterSpacing:1}}>{p.name}</div>
+                    <div style={{fontSize:7,color:"#1a1a1a",letterSpacing:1,marginTop:1}}>{pr.name}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:10,color:"#f5a623",fontWeight:900}}>{p.wins}W</div>
+                    <div style={{fontSize:7,color:"#2a2a2a",letterSpacing:1}}>{p.xp.toLocaleString()} XP</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      <style>{`button:hover{filter:brightness(1.12);}button:active{filter:brightness(.95);}`}</style>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  TOURNAMENT
+// ════════════════════════════════════════════════════════════════
+function Tournament({ profile, onBack, onUpdateProfile }) {
+  const [step, setStep]     = useState("lobby");
+  const [bracket, setBracket] = useState(null);
+  const canEnter = profile.tokens >= TOURN_BUYIN;
+  const ri=getRankIdx(profile.xp), rank=RANKS[ri];
+
+  const startTournament = () => {
+    if (!canEnter) return;
+    onUpdateProfile({ tokens: profile.tokens - TOURN_BUYIN });
+    const players = ["YOU", ...LB_NAMES.slice(0,7)];
+    const qf = [[0,1],[2,3],[4,5],[6,7]].map(([a,b]) => ({ p1:players[a], p2:players[b], winner:null }));
+    setBracket({ rounds:[qf,[],[]], stage:0 });
+    setStep("bracket");
+  };
+
+  const resolveCurrentStage = (playerWon) => {
+    setBracket(prev => {
+      const rounds = prev.rounds.map(r => r.map(m => ({...m})));
+      const stage  = prev.stage;
+      rounds[stage] = rounds[stage].map(m => {
+        if (m.winner) return m;
+        if (m.p1==="YOU" || m.p2==="YOU") return {...m, winner: playerWon ? "YOU" : (m.p1==="YOU" ? m.p2 : m.p1)};
+        return {...m, winner: Math.random()<0.5 ? m.p1 : m.p2};
+      });
+      const winners = rounds[stage].map(m=>m.winner).filter(Boolean);
+      if (winners.length>=2) {
+        const next=[];
+        for(let i=0;i<winners.length;i+=2) next.push({p1:winners[i],p2:winners[i+1]||"BYE",winner:null});
+        rounds[stage+1]=next;
+      }
+      return {...prev, rounds, stage:stage+1};
+    });
+  };
+
+  const handleGameResult = (gameSt) => {
+    const won = gameSt.won;
+    resolveCurrentStage(won);
+    onUpdateProfile({ xp: profile.xp + (won ? 40 : 0) });
+    if (!won) { setStep("eliminated"); return; }
+    setStep("bracket");
+  };
+
+  if (step==="game") {
+    return (
+      <Game
+        mode="cpu" playerXp={profile.xp} tokens={profile.tokens}
+        context="tournament"
+        onGameEnd={(_e,_l,gameSt) => handleGameResult(gameSt)}
+      />
+    );
+  }
+
+  if (step==="eliminated") {
+    return (
+      <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,gap:16,textAlign:"center"}}>
+        <div style={{fontSize:48}}>💀</div>
+        <div style={{fontSize:22,fontWeight:900,letterSpacing:4,color:"#e74c3c"}}>ELIMINATED</div>
+        <div style={{fontSize:9,color:"#e74c3c55",letterSpacing:2}}>Better luck next time</div>
+        <button onPointerDown={onBack} style={{padding:"14px 32px",background:"linear-gradient(135deg,#f5a623,#a05e06)",border:"none",borderRadius:12,color:"#000",fontWeight:900,fontSize:13,letterSpacing:3,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>← MENU</button>
+      </div>
+    );
+  }
+
+  if (step==="won") {
+    const newWins = (profile.tournWins||0)+1;
+    const gotNFT  = newWins >= TOURN_NFT_WINS;
+    return (
+      <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,gap:14,textAlign:"center"}}>
+        <div style={{fontSize:52}}>🏆</div>
+        <div style={{fontSize:22,fontWeight:900,letterSpacing:4,color:"#f5a623"}}>TOURNAMENT WON!</div>
+        <div style={{fontSize:10,color:"#27ae6066",letterSpacing:2}}>+{TOURN_PAYOUT} 🪙 earned · House kept {TOURN_HOUSE}🪙</div>
+        {gotNFT && (
+          <div style={{padding:"16px 24px",background:"rgba(245,166,35,0.1)",border:"2px solid #f5a623",borderRadius:14,textAlign:"center"}}>
+            <div style={{fontSize:32}}>🖼️</div>
+            <div style={{fontSize:14,fontWeight:900,color:"#f5a623",letterSpacing:3,marginTop:4}}>NFT UNLOCKED!</div>
+            <div style={{fontSize:9,color:"#f5a62388",letterSpacing:2,marginTop:4}}>Win {TOURN_NFT_WINS} tournaments — HighClass NFT badge earned!</div>
+          </div>
+        )}
+        <button onPointerDown={onBack} style={{padding:"14px 32px",background:"linear-gradient(135deg,#f5a623,#a05e06)",border:"none",borderRadius:12,color:"#000",fontWeight:900,fontSize:13,letterSpacing:3,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>← MENU</button>
+      </div>
+    );
+  }
+
+  if (step==="bracket" && bracket) {
+    const stage        = bracket.stage;
+    const prevRound    = bracket.rounds[Math.max(0,stage-1)]||[];
+    const playerMatch  = prevRound.find(m=>(m.p1==="YOU"||m.p2==="YOU")&&!m.winner);
+    const nextRound    = bracket.rounds[stage]||[];
+    const playerInNext = nextRound.some(m=>m.p1==="YOU"||m.p2==="YOU");
+    const playerWonAll = stage>=3 && prevRound.some(m=>m.winner==="YOU");
+
+    if (playerWonAll) {
+      const newWins=(profile.tournWins||0)+1;
+      onUpdateProfile({tokens:profile.tokens+TOURN_PAYOUT,tournWins:newWins});
+      setTimeout(()=>setStep("won"),100);
+    }
+
+    return (
+      <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",padding:"18px 12px 28px"}}>
+        <div style={{fontSize:18,letterSpacing:4,fontWeight:900,background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:4}}>🏆 BRACKET</div>
+        <div style={{fontSize:8,color:"#1e1e1e",letterSpacing:2,marginBottom:14}}>Buy-in {TOURN_BUYIN}🪙 · Winner gets {TOURN_PAYOUT}🪙 · House {TOURN_HOUSE}🪙</div>
+        <div style={{display:"flex",gap:10,marginBottom:14,width:"100%",overflowX:"auto"}}>
+          {["QF","SF","FINAL"].map((label,ri2) => (
+            <div key={ri2} style={{display:"flex",flexDirection:"column",gap:6,minWidth:96}}>
+              <div style={{fontSize:7,color:"#252525",letterSpacing:2,textAlign:"center"}}>{label}</div>
+              {(bracket.rounds[ri2]||[]).map((m,mi) => (
+                <div key={mi} style={{padding:"6px 8px",background:"rgba(255,255,255,0.03)",border:`1px solid ${(m.p1==="YOU"||m.p2==="YOU")?"rgba(245,166,35,0.3)":"rgba(255,255,255,0.05)"}`,borderRadius:7}}>
+                  {[m.p1,m.p2].map((p,pi) => (
+                    <div key={pi} style={{fontSize:9,color:m.winner===p?"#f5a623":p==="YOU"?"#27ae60":"#2a2a2a",fontWeight:m.winner===p?900:400,padding:"2px 0",letterSpacing:1}}>
+                      {p==="YOU"?"⭐ YOU":(p||"TBD")}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {playerMatch && (
+          <div style={{width:"100%",maxWidth:300,padding:"14px 20px",background:"rgba(245,166,35,0.09)",border:"2px solid #f5a623",borderRadius:12,textAlign:"center",marginBottom:12}}>
+            <div style={{fontSize:9,color:"#f5a623",letterSpacing:3,marginBottom:6}}>YOUR MATCH</div>
+            <div style={{fontSize:14,marginBottom:12}}>⭐ YOU vs {playerMatch.p1==="YOU"?playerMatch.p2:playerMatch.p1}</div>
+            <button onPointerDown={()=>setStep("game")} style={{width:"100%",padding:"12px 0",background:"linear-gradient(135deg,#27ae60,#1a6e3c)",border:"none",borderRadius:10,color:"#fff",fontWeight:900,fontSize:12,letterSpacing:3,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>🎮 PLAY MATCH</button>
+          </div>
+        )}
+        <button onPointerDown={onBack} style={{padding:"10px 24px",background:"none",border:"1px solid #1c1c1c",borderRadius:8,color:"#2e2e2e",fontSize:9,letterSpacing:2,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>← BACK TO MENU</button>
+      </div>
+    );
+  }
+
+  // Lobby
+  return (
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 16px",gap:12}}>
+      <div style={{fontSize:9,color:rank.color,letterSpacing:4}}>{rank.icon} {rank.name.toUpperCase()}</div>
+      <div style={{fontSize:36}}>🏆</div>
+      <div style={{fontSize:20,fontWeight:900,letterSpacing:5,background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>TOURNAMENT</div>
+      <div style={{padding:"12px 20px",background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:10,fontSize:9,letterSpacing:2,lineHeight:2.2,color:"#2a2a2a",textAlign:"center",maxWidth:280}}>
+        8 players · Single elimination<br/>
+        Buy-in: {TOURN_BUYIN}🪙 · Total pot: 80🪙<br/>
+        Winner: {TOURN_PAYOUT}🪙 · House: {TOURN_HOUSE}🪙<br/>
+        Win {TOURN_NFT_WINS} tournaments → 🖼️ NFT badge
+      </div>
+      <div style={{fontSize:10,color:canEnter?"#27ae60":"#e74c3c",letterSpacing:2}}>
+        Your balance: {profile.tokens}🪙 {!canEnter&&`(need ${TOURN_BUYIN}🪙)`}
+      </div>
+      {(profile.tournWins||0)>0 && (
+        <div style={{fontSize:9,color:"#BA68C8",letterSpacing:2}}>
+          🏆 {profile.tournWins} tournament win{profile.tournWins!==1?"s":""}{(profile.tournWins||0)>=TOURN_NFT_WINS?" · 🖼️ NFT EARNED":""}
+        </div>
+      )}
+      <div style={{display:"flex",flexDirection:"column",gap:10,width:"100%",maxWidth:280}}>
+        <button onPointerDown={startTournament} disabled={!canEnter} style={{padding:"16px 0",background:canEnter?"linear-gradient(135deg,#7b2fa0,#4a1060)":"rgba(255,255,255,0.04)",border:"none",borderRadius:12,color:canEnter?"#fff":"#333",fontWeight:900,fontSize:14,letterSpacing:4,cursor:canEnter?"pointer":"default",fontFamily:"'Courier New',monospace",opacity:canEnter?1:0.5}}>
+          🏆 ENTER ({TOURN_BUYIN}🪙)
+        </button>
+        <button onPointerDown={onBack} style={{padding:"14px 0",background:"none",border:"1px solid #1c1c1c",borderRadius:12,color:"#2e2e2e",fontSize:11,letterSpacing:3,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>← BACK</button>
+      </div>
+      <style>{`button:hover:not(:disabled){filter:brightness(1.12);transform:translateY(-1px);}button:active{transform:translateY(0);}`}</style>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  MENU
+// ════════════════════════════════════════════════════════════════
+function Menu({ profile, onSelect, onStats, onTournament }) {
+  const { xp, tokens, stats, tournWins } = profile;
+  const ri=getRankIdx(xp), rank=RANKS[ri];
+  return (
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 16px"}}>
+      {(tournWins||0)>=TOURN_NFT_WINS && <div style={{position:"absolute",top:16,right:16,fontSize:22}} title="HighClass NFT">🖼️</div>}
+      <div style={{fontSize:9,color:rank.color,letterSpacing:5,marginBottom:4}}>{rank.icon} {rank.name.toUpperCase()}</div>
+      <div style={{fontSize:11,fontWeight:900,letterSpacing:6,background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:2}}>HIGHCLASS</div>
+      <div style={{fontSize:26,fontWeight:900,letterSpacing:4,color:"#f5c030",marginBottom:12}}>🍺 PONG</div>
+      <XpBar xp={xp}/>
+      <TokenBadge tokens={tokens}/>
+      <div style={{height:6}}/>
+      <div style={{fontSize:9,color:"#1e1e1e",letterSpacing:2,marginBottom:16}}>{stats.wins}W · {stats.losses}L · {tournWins||0} Tourn</div>
+      <div style={{display:"flex",flexDirection:"column",gap:10,width:"100%",maxWidth:280,marginBottom:20}}>
+        <button onPointerDown={()=>onSelect("cpu")}   style={{padding:"16px 0",background:"linear-gradient(135deg,#f5a623,#a05e06)",border:"none",borderRadius:12,color:"#000",fontWeight:900,fontSize:14,letterSpacing:4,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>🤖 VS CPU (Free)</button>
+        <button onPointerDown={()=>onSelect("match")} style={{padding:"16px 0",background:"linear-gradient(135deg,#1e6fd4,#0b3480)",border:"none",borderRadius:12,color:"#fff",fontWeight:900,fontSize:14,letterSpacing:4,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>🎮 MATCH — {MATCH_BUYIN}🪙</button>
+        <button onPointerDown={()=>onSelect("multi")} style={{padding:"16px 0",background:"linear-gradient(135deg,#2e7d32,#1b5e20)",border:"none",borderRadius:12,color:"#fff",fontWeight:900,fontSize:14,letterSpacing:4,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>👥 VS FRIEND</button>
+        <button onPointerDown={onTournament}          style={{padding:"16px 0",background:"linear-gradient(135deg,#7b2fa0,#4a1060)",border:"none",borderRadius:12,color:"#fff",fontWeight:900,fontSize:14,letterSpacing:4,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>🏆 TOURNAMENT</button>
+        <button onPointerDown={onStats}               style={{padding:"16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:12,color:"#888",fontWeight:900,fontSize:14,letterSpacing:4,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>📊 STATS</button>
+      </div>
+      <div style={{width:"100%",maxWidth:280}}>
+        <div style={{fontSize:8,color:"#1e1e1e",letterSpacing:4,textAlign:"center",marginBottom:8}}>── RANK LADDER ──</div>
+        {RANKS.map((r,i) => {
+          const isCur=i===ri;
+          return (
+            <div key={r.name} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 12px",background:isCur?`${r.color}18`:"rgba(255,255,255,0.02)",border:`1px solid ${isCur?r.color+"55":"rgba(255,255,255,0.04)"}`,borderRadius:8,marginBottom:4,opacity:xp>=r.xp?1:0.3}}>
+              <span style={{fontSize:14}}>{r.icon}</span>
+              <span style={{flex:1,fontSize:9,letterSpacing:2,color:isCur?r.color:"#2a2a2a",fontWeight:isCur?900:400}}>{r.name.toUpperCase()}</span>
+              <span style={{fontSize:8,color:"#1e1e1e"}}>{r.xp.toLocaleString()} XP</span>
+              {isCur&&<span style={{fontSize:7,color:r.color}}>◀</span>}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{marginTop:14,fontSize:8,color:"#141414",letterSpacing:3}}>🔗 CONNECT WALLET · BET CRO · EARN REWARDS</div>
+      <button
+        onPointerDown={() => {
+          // Wallet connect scaffold — will connect to Cronos via WalletConnect in Step 13 full build
+          alert("🔗 Wallet connect coming soon!\n\nWill support:\n• Crypto.com DeFi Wallet\n• MetaMask (Cronos)\n• WalletConnect\n\nReal CRO betting on Cronos blockchain 🚀");
+        }}
+        style={{marginTop:8,padding:"10px 24px",background:"linear-gradient(135deg,#f5a623,#a05e06)",border:"none",borderRadius:10,color:"#000",fontWeight:900,fontSize:10,letterSpacing:3,cursor:"pointer",fontFamily:"'Courier New',monospace"}}
+      >
+        🔗 CONNECT WALLET
+      </button>
+      <style>{`button:hover:not(:disabled){filter:brightness(1.12);transform:translateY(-1px);}button:active{transform:translateY(0);}`}</style>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  GAME
+// ════════════════════════════════════════════════════════════════
+function Game({ mode, playerXp, tokens: initTokens, context, onGameEnd }) {
+  const P1C="#cc2020", P1G="#ff4444";  // red  — P1/player bottom cups
+  const P2C="#1455c0", P2G="#4488ff";  // blue — P2/CPU top cups
+  const isMulti = mode==="multi";
+  const isMatch = context==="match";
+
+  // ── Cup state ──────────────────────────────────────────────
+  // topCups / botCups: boolean[10] — which cups are standing
+  // topPos  / botPos:  [x,y][10]  — where each cup renders
+  const [topCups, setTopCups] = useState(Array(10).fill(true));
+  const [botCups, setBotCups] = useState(Array(10).fill(true));
+  const [topPos,  setTopPos]  = useState(TOP_CUPS.slice());
+  const [botPos,  setBotPos]  = useState(BOT_CUPS.slice());
+
+  // ── Re-rack: 2 per game per player ────────────────────────
+  const [p1Reracks,  setP1Reracks]  = useState(MAX_RERACKS); // P1 defends bottom
+  const [p2Reracks,  setP2Reracks]  = useState(MAX_RERACKS); // P2 defends top
+  const [showRerack, setShowRerack] = useState(false);
+
+  // ── Game phase & turn ──────────────────────────────────────
+  const [phase,   setPhase]   = useState(isMulti ? "pass" : "aim");
+  const [turn,    setTurn]    = useState(1);
+  const [msg,     setMsg]     = useState("▲ Flick UP · ▼ Flick DOWN = bounce");
+
+  // ── Visual state ───────────────────────────────────────────
+  const [ball,        setBall]        = useState(null);
+  const [splashes,    setSplashes]    = useState([]);
+  const [centerFlash, setCenterFlash] = useState(false);
+  const [winner,      setWinner]      = useState(null);
+  const [winnerName,  setWinnerName]  = useState("");
+  const [shotsLeft,   setShotsLeft]   = useState(2);
+  const [streak,      setStreak]      = useState(0);
+  const [heatLevel,   setHeatLevel]   = useState(0);
+  const [rimCup,      setRimCup]      = useState(null);
+  const [rimCD,       setRimCD]       = useState(0);
+  const [tokens,      setTokens]      = useState(initTokens||0);
+  const [xpEarned,    setXpEarned]    = useState(0);
+  const [xpNotif,     setXpNotif]     = useState(null);
+  const [rankNotif,   setRankNotif]   = useState(null);
+  const [tokenNotif,  setTokenNotif]  = useState(null);
+  const [islandCup,   setIslandCup]   = useState(null);
+  const [codActive,   setCodActive]   = useState(false);
+  const [islandCall,  setIslandCall]  = useState(false);
+  const [walletAddr,  setWalletAddr]  = useState(null);  // connected CRO wallet
+
+  // ── Refs ───────────────────────────────────────────────────
+  const tableRef     = useRef(null);
+  const animRef      = useRef(null);
+  const rimAnimRef   = useRef(null);
+  const rimTimerRef  = useRef(null);
+  const rimIntRef    = useRef(null);
+  const cpuFingRef   = useRef(null);
+  const dragRef      = useRef(null);
+  const phaseRef     = useRef(isMulti ? "pass" : "aim");
+  const turnRef      = useRef(1);
+  const topRef       = useRef(Array(10).fill(true));
+  const botRef       = useRef(Array(10).fill(true));
+  const topPosRef    = useRef(TOP_CUPS.slice());
+  const botPosRef    = useRef(BOT_CUPS.slice());
+  const winnerRef    = useRef(null);
+  const shotsRef     = useRef(2);
+  const streakRef    = useRef(0);
+  const heatRef      = useRef(0);
+  const rimCupRef    = useRef(null);
+  const rimCupsRef   = useRef(null);
+  const rimShooterRef = useRef(null);
+  const xpRef        = useRef(0);
+  const xpLostRef    = useRef(0);
+  const tokRef       = useRef(initTokens||0);
+  const gSt          = useRef({ cupsMade:0, cupsAttempted:0, bouncesMade:0, fireStreaks:0, fingerAttempts:0, fingerSaves:0, fingerMisses:0, won:false });
+
+  // ── Helpers ────────────────────────────────────────────────
+  // Island detection: a cup with no neighbors within ISLAND_DIST is an island
+  // Requires at least 2 remaining cups (can't island a solo cup)
+  const findIsland = (cups, posRef) => {
+    const standing = cups.map((c,i)=>c?i:-1).filter(i=>i!==-1);
+    if (standing.length < 2) return null;  // solo cup is not an island
+    for (const idx of standing) {
+      const ax=posRef[idx][0], ay=posRef[idx][1];
+      const hasNeighbor = standing.some(other => {
+        if (other===idx) return false;
+        const bx=posRef[other][0], by=posRef[other][1];
+        return Math.sqrt((ax-bx)**2+(ay-by)**2) < ISLAND_DIST;
+      });
+      if (!hasNeighbor) return idx;
+    }
+    return null;
+  };
+
+  // Circle of Death: 3 corner cups (top-left, top-right, tip) + center = instant win
+  // Only applies to top rack (player shooting at blue cups)
+  const checkCoD = (cups) => {
+    return COD_CUPS.every(idx => cups[idx] === false);
+  };
+
+
+  const spawnSplash = (side, idx) => {
+    const id = Date.now()+Math.random();
+    setSplashes(p=>[...p,{id,side,idx}]);
+    setTimeout(()=>setSplashes(p=>p.filter(s=>s.id!==id)), 800);
+  };
+  const flashCenter = () => { setCenterFlash(true); setTimeout(()=>setCenterFlash(false),280); };
+
+  const getCupPos = (side, idx) => {
+    const pos = side==="top" ? topPosRef.current : botPosRef.current;
+    return { x: pos[idx][0], y: pos[idx][1] };
+  };
+
+  // ── XP / Token awards ─────────────────────────────────────
+  const awardXp = (amt, label) => {
+    const prev = xpRef.current;
+    xpRef.current = Math.max(0, prev+amt);
+    setXpEarned(xpRef.current);
+    setXpNotif(`${amt>=0?"+":""}${amt} XP${label?` (${label})`:""}`);
+    setTimeout(()=>setXpNotif(null), 1200);
+    if (amt>0) {
+      const oldR=getRankIdx(playerXp+prev), newR=getRankIdx(playerXp+xpRef.current);
+      if (newR>oldR) { sfx("rankup"); setRankNotif({rank:RANKS[newR]}); setTimeout(()=>setRankNotif(null),3500); }
+    }
+  };
+  const awardTokens = (amt, label) => {
+    tokRef.current = Math.max(0, tokRef.current+amt);
+    setTokens(tokRef.current);
+    setTokenNotif(`${amt>=0?"+":""}${amt} 🪙 ${label||""}`);
+    setTimeout(()=>setTokenNotif(null), 1500);
+    sfx("coins");
+  };
+
+  // ── Streak / heat ──────────────────────────────────────────
+  const recordMake = () => {
+    const ns=streakRef.current+1; streakRef.current=ns; setStreak(ns);
+    let h=0;
+    if(ns>=3){h=2;if(heatRef.current<2){sfx("fire");gSt.current.fireStreaks++;}}
+    else if(ns>=2){h=1;if(heatRef.current<1)sfx("heat");}
+    heatRef.current=h; setHeatLevel(h); return ns;
+  };
+  const recordMiss = () => { streakRef.current=0; setStreak(0); heatRef.current=0; setHeatLevel(0); };
+
+  // ── Multiplayer turn switch ────────────────────────────────
+  const doSwitchTurn = () => {
+    const next=turnRef.current===1?2:1;
+    turnRef.current=next; setTurn(next);
+    shotsRef.current=2; setShotsLeft(2);
+    streakRef.current=0; setStreak(0);
+    heatRef.current=0; setHeatLevel(0);
+    phaseRef.current="pass"; setPhase("pass");
+  };
+  const handlePassReady = () => {
+    const t=turnRef.current;
+    phaseRef.current="aim"; setPhase("aim");
+    setMsg(`${t===1?"P1 🔴":"P2 🔵"} — Flick ${t===1?"UP":"DOWN"} to shoot!`);
+  };
+
+  // ── Re-rack apply ──────────────────────────────────────────
+  // P1's turn → rearranges TOP blue cups (what P1 shoots at)
+  // P2's turn → rearranges BOT red cups (what P2 shoots at)
+  const applyRerack = (newPos) => {
+    const t = turnRef.current;
+    if (t === 1) {
+      // P1 re-racks their OWN bottom red cups
+      botPosRef.current = newPos;
+      setBotPos([...newPos]);
+      setP1Reracks(p => p - 1);
+    } else {
+      // P2 re-racks their OWN top blue cups
+      topPosRef.current = newPos;
+      setTopPos([...newPos]);
+      setP2Reracks(p => p - 1);
+    }
+    setShowRerack(false);
+    setMsg("✅ Re-rack applied! Keep shooting!");
+  };
+
+  // ── Ball arc animation ─────────────────────────────────────
+  const animateArc = (s, e, arcH, dur, onDone) => {
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    const t0=performance.now();
+    const tick = (now) => {
+      const raw=Math.min((now-t0)/dur,1), ease=raw<0.5?2*raw*raw:-1+(4-2*raw)*raw;
+      setBall({x:s.x+(e.x-s.x)*ease, y:s.y+(e.y-s.y)*ease-arcH*Math.sin(Math.PI*raw)});
+      if(raw<1) animRef.current=requestAnimationFrame(tick);
+      else { setBall(null); onDone(); }
+    };
+    animRef.current=requestAnimationFrame(tick);
+  };
+
+  // ── Bounce animation (2-segment) ──────────────────────────
+  const animateBounce = (s, mid, e, onDone) => {
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    const D1=520, D2=500; let flashed=false;
+    const t0=performance.now();
+    const tick = (now) => {
+      const el=now-t0; let x,y,done=false;
+      if (el<=D1) {
+        const raw=el/D1, ease=raw<0.5?2*raw*raw:-1+(4-2*raw)*raw;
+        x=s.x+(mid.x-s.x)*ease; y=s.y+(mid.y-s.y)*ease-10*Math.sin(Math.PI*raw);
+        if(!flashed&&raw>=0.92){flashed=true;flashCenter();sfx("bounce");}
+      } else {
+        const raw=Math.min((el-D1)/D2,1), ease=raw<0.5?2*raw*raw:-1+(4-2*raw)*raw;
+        x=mid.x+(e.x-mid.x)*ease; y=mid.y+(e.y-mid.y)*ease-8*Math.sin(Math.PI*raw); done=raw>=1;
+      }
+      setBall({x,y});
+      if(!done) animRef.current=requestAnimationFrame(tick);
+      else { setBall(null); onDone(); }
+    };
+    animRef.current=requestAnimationFrame(tick);
+  };
+
+  // ── Rim mechanic ───────────────────────────────────────────
+  const startRim = (side, idx, cx, cy, cupsToSink, shooter) => {
+    rimCupRef.current={side,idx,x:cx,y:cy};
+    rimCupsRef.current=cupsToSink;
+    rimShooterRef.current=shooter;
+    setRimCup({side,idx}); setRimCD(RIM_MS/1000); sfx("rim");
+    const t0=performance.now();
+    const orbit=(now)=>{
+      const prog=Math.min((now-t0)/RIM_MS,1), angle=prog*4*Math.PI;
+      setBall({x:cx+Math.cos(angle)*3.8, y:cy+Math.sin(angle)*1.8});
+      if(prog<1) rimAnimRef.current=requestAnimationFrame(orbit);
+    };
+    rimAnimRef.current=requestAnimationFrame(orbit);
+    const st=Date.now();
+    rimIntRef.current=setInterval(()=>{
+      const rem=Math.max(0,(RIM_MS-(Date.now()-st))/1000);
+      setRimCD(+rem.toFixed(1));
+      if(rem<=0) clearInterval(rimIntRef.current);
+    },80);
+    rimTimerRef.current=setTimeout(()=>resolveRim(false), RIM_MS);
+    if(!isMulti && shooter===1 && Math.random()<CPU_FING) {
+      cpuFingRef.current=setTimeout(()=>resolveRim(true), 400+Math.random()*800);
+    }
+    const defName=shooter===1?(isMulti?"P2 🔵":"CPU"):(isMulti?"P1 🔴":"YOU");
+    setMsg(`😮 RIMMING! ${defName} — ${(isMulti||shooter===2)?"hit FINGER IT!":"defending..."}`);
+  };
+
+  const resolveRim = (fingered) => {
+    clearTimeout(rimTimerRef.current); clearTimeout(cpuFingRef.current);
+    clearInterval(rimIntRef.current);
+    if(rimAnimRef.current) cancelAnimationFrame(rimAnimRef.current);
+    const shooter=rimShooterRef.current, cups=rimCupsRef.current;
+    setBall(null); setRimCup(null); rimCupRef.current=null; setRimCD(0);
+    if(fingered){
+      sfx("saved"); recordMiss(); advanceMiss(shooter);
+    } else {
+      sinkCups(cups, shooter===1?"top":"bottom", shooter);
+    }
+  };
+
+  // ── Finger It button ───────────────────────────────────────
+  const handleFingerIt = () => {
+    const hasRim = rimCupRef.current !== null;
+    gSt.current.fingerAttempts++;
+    if (hasRim) {
+      gSt.current.fingerSaves++;
+      awardXp(XP_FINGER_SAVE, "Finger save!");
+      resolveRim(true);
+    } else {
+      gSt.current.fingerMisses++;
+      awardXp(XP_FINGER_MISS, "Missed finger!");
+      setMsg("❌ Mis-tap! -2.5 XP");
+    }
+  };
+
+  // ── Advance turn after miss ────────────────────────────────
+  const advanceMiss = (shooter) => {
+    const next=shotsRef.current-1; shotsRef.current=next; setShotsLeft(next);
+    if(next>0){
+      setMsg(`😬 Missed! Shot 2 — Flick ${turnRef.current===1?"UP":"DOWN"}!`);
+      setTimeout(()=>{phaseRef.current="aim";setPhase("aim");},200);
+    } else {
+      shotsRef.current=2; setShotsLeft(2);
+      if(isMulti) doSwitchTurn();
+      else { setMsg("😬 CPU's turn..."); setTimeout(runCpu,900); }
+    }
+  };
+
+  // ── Sink cups ──────────────────────────────────────────────
+  const sinkCups = (cupsToSink, side, shooter) => {
+    const isP1 = shooter===1;
+    const ref  = isP1 ? topRef : botRef;
+    const set  = isP1 ? setTopCups : setBotCups;
+    const cups = ref.current.slice();
+    cupsToSink.forEach(idx=>{cups[idx]=false; spawnSplash(side,idx);});
+    ref.current=cups; set(cups); sfx("splash");
+
+    const isBounce=cupsToSink.length===2;
+    if(isP1){
+      gSt.current.cupsMade+=cupsToSink.length;
+      if(isBounce) gSt.current.bouncesMade++;
+      awardXp(XP_CUP*cupsToSink.length, isBounce?"Bounce!":"Cup");
+      if(isBounce) awardXp(XP_BOUNCE,"Bounce bonus");
+    }
+
+    const rem=cups.reduce((n,c)=>n+(c?1:0),0);
+    if(rem===0){
+      setTimeout(()=>{
+        if(isP1){
+          sfx("win"); gSt.current.won=true;
+          awardXp(XP_WIN,"WIN!");
+          if(isMatch) awardTokens(MATCH_PAYOUT,"Match win!");
+          setWinner(1); winnerRef.current=1;
+          setWinnerName(isMulti?"🏆 P1 WINS!":"🏆 YOU WIN!");
+        } else {
+          sfx("lose");
+          const loss=Math.floor(Math.max(0,xpRef.current)*0.25);
+          xpLostRef.current=loss; xpRef.current=Math.max(0,xpRef.current-loss);
+          setXpEarned(xpRef.current);
+          if(isMatch) awardTokens(-MATCH_BUYIN,"Match lost");
+          setWinner(2); winnerRef.current=2;
+          setWinnerName(isMulti?"🏆 P2 WINS!":"💀 CPU WINS! GG");
+        }
+        phaseRef.current="over"; setPhase("over");
+      },400);
+      return;
+    }
+
+    if(isP1){
+      const ns=recordMake(), label=isBounce?"🏀 2 cups!":"💦 Splash!";
+      if(ns>=3){awardXp(XP_FIRE,"On Fire!");setMsg(`🔥 ON FIRE! ${label} Keep shooting!`);setTimeout(()=>{phaseRef.current="aim";setPhase("aim");},150);return;}
+      const nextShots=shotsRef.current-1; shotsRef.current=nextShots; setShotsLeft(nextShots);
+      const hm=ns>=2?"🌡️ Heating Up! ":"";
+      if(nextShots>0){setMsg(`${hm}${label} Shot 2!`);setTimeout(()=>{phaseRef.current="aim";setPhase("aim");},150);}
+      else{shotsRef.current=2;setShotsLeft(2);if(isMulti){setMsg(`${hm}${label}`);setTimeout(doSwitchTurn,1200);}else{setMsg(`${hm}${label} ${rem} left — CPU!`);setTimeout(runCpu,1300);}}
+    } else if(isMulti){
+      const ns=recordMake(), label=isBounce?"🏀 2 cups!":"💦 P2 Splash!";
+      if(ns>=3){setMsg(`🔥 P2 ON FIRE! ${label}`);setTimeout(()=>{phaseRef.current="aim";setPhase("aim");},150);return;}
+      const nextShots=shotsRef.current-1; shotsRef.current=nextShots; setShotsLeft(nextShots);
+      if(nextShots>0){setMsg(`${label} P2 Shot 2!`);setTimeout(()=>{phaseRef.current="aim";setPhase("aim");},150);}
+      else{shotsRef.current=2;setShotsLeft(2);setTimeout(doSwitchTurn,1200);}
+    }
+  };
+
+  // ── Table % helper ─────────────────────────────────────────
+  const getP = (cx,cy) => {
+    const r=tableRef.current?.getBoundingClientRect(); if(!r) return null;
+    return {x:((cx-r.left)/r.width)*100, y:((cy-r.top)/r.height)*100};
+  };
+
+  // ── Pointer events ─────────────────────────────────────────
+  const onDown = (e) => {
+    if(phaseRef.current!=="aim") return;
+    const pos=getP(e.clientX,e.clientY); if(!pos) return;
+    const t=turnRef.current;
+    if(t===1&&pos.y<30) return;
+    if(t===2&&pos.y>70) return;
+    try{e.currentTarget.setPointerCapture(e.pointerId);}catch(err){}
+    dragRef.current={sx:pos.x, sy:pos.y};
+  };
+  const onUp = (e) => {
+    const drag=dragRef.current; dragRef.current=null; if(!drag) return;
+    const pos=getP(e.clientX,e.clientY); if(!pos) return;
+    const dx=pos.x-drag.sx, dy=pos.y-drag.sy, mag=Math.sqrt(dx*dx+dy*dy);
+    if(mag<6) return;
+    gSt.current.cupsAttempted++;
+    shoot(dx,dy,mag,drag.sx);
+  };
+
+  // ── Shoot ──────────────────────────────────────────────────
+  const shoot = (dx,dy,mag,sx) => {
+    if(phaseRef.current!=="aim") return;
+    phaseRef.current="busy"; setPhase("busy");
+    const t=turnRef.current, validUp=dy<-3, validDown=dy>3;
+    if(!validUp&&!validDown){phaseRef.current="aim";setPhase("aim");setMsg(`Flick ${t===1?"UP":"DOWN"} to shoot!`);return;}
+
+    const isBounce=(t===1&&validDown)||(t===2&&validUp);
+    const force=Math.min(mag/32,1.0);
+    const isP1=t===1;
+    const cupsRef=isP1?topRef:botRef;
+    const side=isP1?"top":"bottom";
+    const landX=Math.max(10,Math.min(90,50+dx*1.9));
+    const landY=isP1?Math.max(3,Math.min(26,25-force*22)):Math.max(74,Math.min(97,76+force*22));
+    const startPos=isP1?{x:sx,y:96}:{x:sx,y:4};
+
+    const standing=cupsRef.current.map((c,i)=>c?i:-1).filter(i=>i!==-1);
+    if(!standing.length){phaseRef.current="aim";setPhase("aim");return;}
+
+    // Find nearest cup using current positions (handles re-racked cups)
+    let nIdx=null, nDist=Infinity, nX=0, nY=0;
+    standing.forEach(idx=>{
+      const {x,y}=getCupPos(side,idx);
+      const d=Math.sqrt((x-landX)**2+(y-landY)**2);
+      if(d<nDist){nDist=d;nIdx=idx;nX=x;nY=y;}
+    });
+
+    const isHit=nDist<(isBounce?BOUNCE_HIT_R:HIT_R);
+    const end=isHit?{x:nX,y:nY}:{x:landX,y:landY};
+
+    const onDone=()=>{
+      if(!isHit){sfx("miss");recordMiss();advanceMiss(t);return;}
+      const toSink=[nIdx];
+
+      // Island rule: hitting a non-island cup when island exists = no sink (miss)
+      const posR = isP1 ? topPosRef.current : botPosRef.current;
+      const isle = findIsland(cupsRef.current, posR);
+      if(isle!==null && nIdx!==isle && !islandCall){
+        sfx("miss"); recordMiss();
+        setMsg("🏝️ That cup's not the island! Call it first!");
+        advanceMiss(t); return;
+      }
+      // Island hit gives bonus cup
+      if(isle!==null && nIdx===isle){
+        sfx("win");
+        setMsg("🏝️ ISLAND SHOT! Bonus cup removed!");
+        const tmp=cupsRef.current.slice(); tmp[nIdx]=false;
+        const others=tmp.map((c,i)=>c?i:-1).filter(i=>i!==-1);
+        if(others.length) toSink.push(others[Math.floor(Math.random()*others.length)]);
+        setIslandCall(false); setIslandCup(null);
+      }
+
+      if(isBounce){
+        const tmp=cupsRef.current.slice(); tmp[nIdx]=false;
+        const others=tmp.map((c,i)=>c?i:-1).filter(i=>i!==-1);
+        if(others.length && !toSink.includes(others[0])) toSink.push(others[Math.floor(Math.random()*others.length)]);
+      }
+
+      // Circle of Death check — did we just sink the 3 corners + center?
+      if(isP1){
+        const tmpCups=cupsRef.current.slice();
+        toSink.forEach(i=>tmpCups[i]=false);
+        if(checkCoD(tmpCups)){
+          setTimeout(()=>{
+            sfx("nft");
+            setCodActive(true);
+            setMsg("☠️ CIRCLE OF DEATH! INSTANT WIN!");
+            setWinner(1); winnerRef.current=1;
+            setWinnerName("☠️ CIRCLE OF DEATH — YOU WIN!");
+            phaseRef.current="over"; setPhase("over");
+          },600);
+          return;
+        }
+      }
+
+      if(Math.random()<RIM_CHANCE) startRim(side,nIdx,nX,nY,toSink,t);
+      else sinkCups(toSink,side,t);
+    };
+
+    if(isBounce){const midX=sx+(end.x-sx)*0.5;animateBounce(startPos,{x:Math.max(8,Math.min(92,midX)),y:50},end,onDone);}
+    else animateArc(startPos,end,14+force*10,1000-force*240,onDone);
+  };
+
+  // ── CPU shoot ──────────────────────────────────────────────
+  const runCpu = (shots=2) => {
+    if(winnerRef.current) return;
+    setMsg(`🤖 CPU aiming... (${3-shots} of 2)`);
+    const standing=botRef.current.map((c,i)=>c?i:-1).filter(i=>i!==-1);
+    if(!standing.length) return;
+    const tgt=standing[Math.floor(Math.random()*standing.length)];
+    const {x:tx,y:ty}=getCupPos("bottom",tgt);
+    const isHit=Math.random()<CPU_ACC;
+    const end=isHit?{x:tx,y:ty}:{x:Math.max(10,Math.min(90,tx+(Math.random()*18-9))),y:Math.max(74,Math.min(96,ty+(Math.random()*10-5)))};
+
+    animateArc({x:50,y:4},end,18,920,()=>{
+      if(!isHit){
+        sfx("miss");
+        if(shots>1){setMsg("😅 CPU missed! Shot 2...");setTimeout(()=>runCpu(shots-1),900);}
+        else{setMsg("😅 CPU missed! Your turn 🎯");phaseRef.current="aim";setPhase("aim");}
+        return;
+      }
+      if(Math.random()<RIM_CHANCE){
+        startRim("bottom",tgt,tx,ty,[tgt],2);
+        clearTimeout(rimTimerRef.current);
+        rimTimerRef.current=setTimeout(()=>{
+          clearInterval(rimIntRef.current);
+          if(rimAnimRef.current) cancelAnimationFrame(rimAnimRef.current);
+          const c2=rimCupsRef.current;
+          setBall(null);setRimCup(null);rimCupRef.current=null;setRimCD(0);
+          const cups=botRef.current.slice();
+          c2.forEach(idx=>{cups[idx]=false;spawnSplash("bottom",idx);});
+          botRef.current=cups;setBotCups(cups);sfx("splash");
+          const rem=cups.reduce((n,c)=>n+(c?1:0),0);
+          if(rem===0){setTimeout(()=>{sfx("lose");setWinner(2);winnerRef.current=2;setWinnerName("💀 CPU WINS!");phaseRef.current="over";setPhase("over");},400);return;}
+          if(shots>1){setMsg("😱 CPU scored! Shot 2...");setTimeout(()=>runCpu(shots-1),1000);}
+          else{setMsg("😱 CPU scored! Your turn 🎯");phaseRef.current="aim";setPhase("aim");}
+        },RIM_MS);
+        return;
+      }
+      const cups=botRef.current.slice();cups[tgt]=false;botRef.current=cups;setBotCups(cups);
+      spawnSplash("bottom",tgt);sfx("splash");
+      const rem=cups.reduce((n,c)=>n+(c?1:0),0);
+      if(rem===0){setTimeout(()=>{sfx("lose");setWinner(2);winnerRef.current=2;setWinnerName("💀 CPU WINS!");phaseRef.current="over";setPhase("over");},400);return;}
+      if(shots>1){setMsg("😱 CPU scored! Shot 2...");setTimeout(()=>runCpu(shots-1),1000);}
+      else{setMsg("😱 CPU scored! Your turn 🎯");phaseRef.current="aim";setPhase("aim");}
+    });
+  };
+
+  // ── Derived display values ─────────────────────────────────
+  const topLeft   = topCups.reduce((n,c)=>n+(c?1:0),0);
+  const botLeft   = botCups.reduce((n,c)=>n+(c?1:0),0);
+  const heatMap   = {
+    0:null,
+    1:{bg:"#DAA52022",border:"#DAA520",text:"#DAA520",label:"🌡️ HEATING UP!"},
+    2:{bg:"#FF704322",border:"#FF7043",text:"#FF7043",label:"🔥 ON FIRE — SHOOT AGAIN!"},
+  };
+  const heat       = heatMap[heatLevel];
+  const turnC      = turn===1?P1C:P2C;
+  const shotDots   = [0,1].map(i=>({active:i<shotsLeft,color:heatLevel===2?"#FF7043":heatLevel===1?"#DAA520":"#f5a623"}));
+  const canFinger  = rimCup&&((!isMulti&&rimShooterRef.current===2)||(isMulti&&turn!==rimShooterRef.current));
+  const ri         = getRankIdx(playerXp+xpEarned);
+  const curRank    = RANKS[ri];
+  const reracksLeft = turn===1 ? p1Reracks : p2Reracks;
+  const canRerack   = phase==="aim" && reracksLeft>0;
+
+  // Island detection on the cups the CURRENT player is shooting at
+  // P1 shoots at TOP (blue), P2 shoots at BOTTOM (red)
+  const curIsland = (() => {
+    if (phase !== "aim") return null;
+    const isP1 = turn === 1;
+    const cups = isP1 ? topCups : botCups;
+    const posR = isP1 ? topPos : botPos;  // use state arrays not refs
+    return findIsland(cups, posR);
+  })();
+
+  // ── Early returns ──────────────────────────────────────────
+  if (showRerack) {
+    const t           = turnRef.current;
+    // Player re-racks THEIR OWN cups (what the opponent shoots at)
+    // P1 defends BOTTOM red cups, P2 defends TOP blue cups
+    const side        = t === 1 ? "bottom" : "top";
+    const cupStanding = side === "top" ? topCups : botCups;
+    const cupPos      = side === "top" ? topPosRef.current : botPosRef.current;
+    return (
+      <ReRackPicker
+        side={side}
+        cupStanding={cupStanding}
+        cupPositions={cupPos}
+        onConfirm={applyRerack}
+        onCancel={() => setShowRerack(false)}
+      />
+    );
+  }
+  if(phase==="pass") return <PassScreen turn={turn} onReady={handlePassReady}/>;
+
+  // ── Main render ────────────────────────────────────────────
+  return (
+    <div style={{minHeight:"100vh",background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",color:"#fff",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",padding:"12px 10px 28px",userSelect:"none"}}>
+
+      {/* Rank up popup */}
+      {rankNotif && (
+        <div style={{position:"fixed",top:14,left:"50%",transform:"translateX(-50%)",zIndex:999,background:"linear-gradient(135deg,#120d00,#211700)",border:`2px solid ${rankNotif.rank.color}`,borderRadius:14,padding:"12px 22px",boxShadow:`0 0 42px ${rankNotif.rank.color}88`,animation:"popIn .35s ease",textAlign:"center",whiteSpace:"nowrap"}}>
+          <div style={{fontSize:8,color:"#555",letterSpacing:3,marginBottom:4}}>🎉 RANK UP!</div>
+          <div style={{fontSize:20}}>{rankNotif.rank.icon} <b style={{fontSize:14,color:rankNotif.rank.color}}>{rankNotif.rank.name.toUpperCase()}</b></div>
+        </div>
+      )}
+
+      {/* XP flash */}
+      {xpNotif && (
+        <div style={{position:"fixed",top:"45%",left:"50%",transform:"translate(-50%,-50%)",fontSize:18,fontWeight:900,pointerEvents:"none",zIndex:200,color:xpNotif.startsWith("-")?"#e74c3c":"#f5a623",animation:"popIn .3s ease",textShadow:`0 0 16px ${xpNotif.startsWith("-")?"#e74c3c":"#f5a623"}`}}>
+          {xpNotif}
+        </div>
+      )}
+
+      {/* Token flash */}
+      {tokenNotif && (
+        <div style={{position:"fixed",top:"38%",left:"50%",transform:"translate(-50%,-50%)",fontSize:16,fontWeight:900,pointerEvents:"none",zIndex:200,color:"#f5a623",animation:"popIn .3s ease"}}>
+          {tokenNotif}
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",width:"100%",maxWidth:350,marginBottom:6}}>
+        <button onPointerDown={()=>onGameEnd(xpRef.current,xpLostRef.current,gSt.current)} style={{background:"none",border:"1px solid #1c1c1c",color:"#2e2e2e",borderRadius:6,padding:"4px 9px",fontSize:9,letterSpacing:2,cursor:"pointer"}}>← MENU</button>
+        <div style={{flex:1,textAlign:"center",fontSize:10,fontWeight:900,letterSpacing:4,background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>HIGHCLASS 🍺 PONG</div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <TokenBadge tokens={tokens}/>
+          <div style={{fontSize:9,color:curRank.color}}>{curRank.icon}</div>
+        </div>
+      </div>
+
+      <XpBar xp={playerXp+xpEarned} compact/>
+
+      {heat && (
+        <div style={{width:"100%",maxWidth:350,marginBottom:8,padding:"7px 0",textAlign:"center",background:heat.bg,border:`1px solid ${heat.border}`,borderRadius:8,fontSize:11,fontWeight:900,letterSpacing:3,color:heat.text,animation:"heatPulse .6s ease-in-out infinite alternate"}}>
+          {heat.label}
+        </div>
+      )}
+      {rimCup && (
+        <div style={{width:"100%",maxWidth:350,marginBottom:8,padding:"7px 0",textAlign:"center",background:"rgba(255,215,0,0.1)",border:"1px solid gold",borderRadius:8,fontSize:11,fontWeight:900,letterSpacing:2,color:"gold"}}>
+          😮 RIMMING! {rimCD}s
+        </div>
+      )}
+
+      {/* Scoreboard */}
+      <div style={{display:"flex",width:"100%",maxWidth:350,marginBottom:8,border:"1px solid rgba(255,255,255,0.06)",borderRadius:12,overflow:"hidden"}}>
+        <div style={{flex:1,padding:"8px 0",textAlign:"center",background:`${P2C}1c`,borderRight:"1px solid rgba(255,255,255,0.06)"}}>
+          <div style={{fontSize:8,letterSpacing:3,color:P2C,marginBottom:2}}>{isMulti?"P2 🔵":"YOU 🔵"}</div>
+          <div style={{fontSize:20,fontWeight:900}}>{topLeft}</div>
+          <div style={{fontSize:7,color:`${P2C}aa`,letterSpacing:1,marginTop:1}}>GET TO ZERO</div>
+        </div>
+        <div style={{flex:1,padding:"8px 0",textAlign:"center",background:"rgba(255,255,255,0.02)"}}>
+          <div style={{fontSize:8,letterSpacing:3,color:P1C,marginBottom:2}}>{isMulti?"P1 🔴":"CPU 🔴"}</div>
+          <div style={{fontSize:20,fontWeight:900}}>{botLeft}</div>
+          <div style={{fontSize:7,color:`${P1C}aa`,letterSpacing:1,marginTop:1}}>GET TO ZERO</div>
+        </div>
+      </div>
+
+      {/* Shot dots + re-rack button */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",maxWidth:350,marginBottom:10}}>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <span style={{fontSize:8,letterSpacing:2,color:"#2a2a2a"}}>SHOTS</span>
+          {shotDots.map((d,i) => (
+            <div key={i} style={{width:10,height:10,borderRadius:"50%",background:d.active?d.color:"rgba(255,255,255,0.06)",boxShadow:d.active?`0 0 8px ${d.color}`:"none",transition:"all .2s"}}/>
+          ))}
+        </div>
+        {canRerack && (
+          <button
+            onPointerDown={()=>setShowRerack(true)}
+            style={{padding:"5px 12px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6,color:"#f5a623",fontSize:8,letterSpacing:2,cursor:"pointer",fontFamily:"'Courier New',monospace"}}
+          >
+            🔄 RE-RACK ({reracksLeft})
+          </button>
+        )}
+      </div>
+
+      {/* TABLE */}
+      <div
+        ref={tableRef}
+        onPointerDown={onDown}
+        onPointerUp={onUp}
+        onPointerLeave={onUp}
+        style={{
+          width:"100%",maxWidth:350,height:720,
+          background:[
+            "repeating-linear-gradient(90deg,rgba(255,255,255,0.006) 0,rgba(255,255,255,0.006) 1px,transparent 1px,transparent 22px)",
+            "repeating-linear-gradient(0deg,rgba(0,0,0,0.04) 0,rgba(0,0,0,0.04) 1px,transparent 1px,transparent 30px)",
+            "linear-gradient(180deg,#091709 0%,#112512 35%,#142c16 50%,#112512 65%,#091709 100%)",
+          ].join(","),
+          borderRadius:22,
+          border:`3px solid ${rimCup?"gold":heatLevel===2?"#FF7043":heatLevel===1?"#DAA520":"#27ae60"}`,
+          boxShadow:rimCup?"0 0 55px rgba(255,215,0,0.3),inset 0 0 90px rgba(0,0,0,0.7)":"0 0 55px rgba(39,174,96,0.16),inset 0 0 90px rgba(0,0,0,0.7)",
+          position:"relative",overflow:"hidden",marginBottom:12,
+          touchAction:"none",cursor:phase==="aim"?"crosshair":"default",
+          transition:"border-color .3s,box-shadow .3s",
+        }}
+      >
+        {/* Rails */}
+        <div style={{position:"absolute",top:0,left:0,right:0,height:4,background:"linear-gradient(90deg,#3c6,#27ae60,#3c6)"}}/>
+        <div style={{position:"absolute",bottom:0,left:0,right:0,height:4,background:"linear-gradient(90deg,#3c6,#27ae60,#3c6)"}}/>
+        <div style={{position:"absolute",top:0,bottom:0,left:0,width:4,background:"linear-gradient(180deg,#3c6,#27ae60,#3c6)"}}/>
+        <div style={{position:"absolute",top:0,bottom:0,right:0,width:4,background:"linear-gradient(180deg,#3c6,#27ae60,#3c6)"}}/>
+
+        {/* Center line */}
+        <div style={{position:"absolute",top:"50%",left:"4%",right:"4%",height:2,transform:"translateY(-50%)",background:centerFlash?"rgba(255,245,50,0.95)":"rgba(255,255,255,0.09)",boxShadow:centerFlash?"0 0 28px 10px rgba(255,245,50,0.85)":"0 0 5px rgba(255,255,255,0.04)",transition:"all .07s"}}/>
+
+        {/* Active side glow */}
+        {phase==="aim"&&!rimCup&&(
+          <div style={{position:"absolute",...(turn===1?{top:0,left:0,right:0,height:"36%",background:`linear-gradient(to bottom,${P2C}11,transparent)`}:{bottom:0,left:0,right:0,height:"36%",background:`linear-gradient(to top,${P1C}11,transparent)`}),pointerEvents:"none"}}/>
+        )}
+
+        {/* Cup count labels */}
+        <div style={{position:"absolute",top:10,left:"50%",transform:"translateX(-50%)",fontSize:7,letterSpacing:3,color:`${P2C}55`}}>🔵 {topLeft} CUPS</div>
+        <div style={{position:"absolute",bottom:10,left:"50%",transform:"translateX(-50%)",fontSize:7,letterSpacing:3,color:`${P1C}55`}}>🔴 {botLeft} CUPS</div>
+
+        {/* Flick hint */}
+        {phase==="aim"&&!rimCup&&(
+          <div style={{position:"absolute",...(turn===1?{bottom:7}:{top:7}),left:"50%",transform:"translateX(-50%)",fontSize:7,letterSpacing:2,color:`${turnC}55`,pointerEvents:"none"}}>
+            {turn===1?"▲ UP = SHOT · ▼ DOWN = BOUNCE":"▼ DOWN = SHOT · ▲ UP = BOUNCE"}
+          </div>
+        )}
+
+        {isMulti&&phase==="aim"&&(
+          <div style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",fontSize:9,color:`${turnC}33`,letterSpacing:2,pointerEvents:"none"}}>{turn===1?"P1":"P2"} SHOOTING</div>
+        )}
+
+        {/* TOP cups — blue */}
+        {topCups.map((standing,i) => {
+          const {x,y}=getCupPos("top",i);
+          return (
+            <div key={`t${i}`} style={{position:"absolute",left:`${x}%`,top:`${y}%`,transform:"translate(-50%,-50%)",transition:"left .4s ease,top .4s ease"}}>
+              <Cup standing={standing} splash={splashes.some(s=>s.side==="top"&&s.idx===i)} rimming={rimCup?.side==="top"&&rimCup?.idx===i} color={P2C} glow={P2G}/>
+            </div>
+          );
+        })}
+
+        {/* BOT cups — red */}
+        {botCups.map((standing,i) => {
+          const {x,y}=getCupPos("bottom",i);
+          return (
+            <div key={`b${i}`} style={{position:"absolute",left:`${x}%`,top:`${y}%`,transform:"translate(-50%,-50%)",transition:"left .4s ease,top .4s ease"}}>
+              <Cup standing={standing} splash={splashes.some(s=>s.side==="bottom"&&s.idx===i)} rimming={rimCup?.side==="bottom"&&rimCup?.idx===i} color={P1C} glow={P1G}/>
+            </div>
+          );
+        })}
+
+        {/* Splash ripples */}
+        {splashes.map(sp => {
+          const {x,y}=getCupPos(sp.side,sp.idx);
+          return (
+            <div key={sp.id} style={{position:"absolute",left:`${x}%`,top:`${y}%`,transform:"translate(-50%,-50%)",width:30,height:30,borderRadius:"50%",border:`2px solid ${sp.side==="top"?P2G:P1G}`,animation:"ripple .7s ease-out forwards",pointerEvents:"none",zIndex:25}}/>
+          );
+        })}
+
+        {/* Ball */}
+        {ball && (
+          <div style={{position:"absolute",left:`${ball.x}%`,top:`${ball.y}%`,transform:"translate(-50%,-50%)",width:13,height:13,borderRadius:"50%",background:"radial-gradient(circle at 34% 30%,#fff,#ddd)",boxShadow:rimCup?"0 0 13px rgba(255,215,0,0.98)":"0 0 13px rgba(255,255,255,0.98)",zIndex:30,pointerEvents:"none"}}/>
+        )}
+      </div>
+
+      {/* Island call button — shows when an island cup exists */}
+      {curIsland !== null && phase === "aim" && !islandCall && (
+        <div style={{ width:"100%", maxWidth:350, marginBottom:8, display:"flex", gap:8, alignItems:"center", padding:"8px 14px", background:"rgba(20,180,100,0.1)", border:"1px solid rgba(20,180,100,0.4)", borderRadius:10 }}>
+          <div style={{ flex:1, fontSize:9, color:"#14b464", letterSpacing:2 }}>🏝️ ISLAND detected! Call it for a bonus cup</div>
+          <button
+            onPointerDown={() => { setIslandCall(true); setMsg("🏝️ Island called! Sink it for bonus cup!"); }}
+            style={{ padding:"6px 14px", background:"linear-gradient(135deg,#14b464,#0a7a3c)", border:"none", borderRadius:8, color:"#fff", fontWeight:900, fontSize:9, letterSpacing:2, cursor:"pointer", fontFamily:"'Courier New',monospace" }}
+          >
+            CALL IT
+          </button>
+        </div>
+      )}
+      {islandCall && (
+        <div style={{ width:"100%", maxWidth:350, marginBottom:8, padding:"7px 0", textAlign:"center", background:"rgba(20,180,100,0.12)", border:"1px solid #14b464", borderRadius:8, fontSize:10, fontWeight:900, color:"#14b464", letterSpacing:2 }}>
+          🏝️ ISLAND CALLED — sink it!
+        </div>
+      )}
+
+      {/* Circle of Death indicator */}
+      {codActive && (
+        <div style={{ width:"100%", maxWidth:350, marginBottom:8, padding:"7px 0", textAlign:"center", background:"rgba(255,0,0,0.1)", border:"1px solid #e74c3c", borderRadius:8, fontSize:11, fontWeight:900, color:"#e74c3c", letterSpacing:2, animation:"heatPulse .5s ease-in-out infinite alternate" }}>
+          ☠️ CIRCLE OF DEATH ACTIVE
+        </div>
+      )}
+
+      {/* Status message */}
+      <div style={{fontSize:12,letterSpacing:2,color:rimCup?"gold":heatLevel===2?"#FF7043":heatLevel===1?"#DAA520":turnC,minHeight:18,marginBottom:12,textAlign:"center",transition:"color .3s"}}>
+        {msg}
+      </div>
+
+      {/* FINGER IT button */}
+      {canFinger && (
+        <button
+          onPointerDown={handleFingerIt}
+          style={{padding:"14px 36px",background:"linear-gradient(135deg,gold,#b8860b)",border:"none",borderRadius:12,color:"#000",fontWeight:900,fontSize:16,letterSpacing:3,cursor:"pointer",boxShadow:"0 0 32px rgba(255,215,0,0.6)",fontFamily:"'Courier New',monospace",animation:"heatPulse .4s ease-in-out infinite alternate",marginBottom:10}}
+        >
+          🫵 FINGER IT! ({rimCD}s)
+        </button>
+      )}
+      {rimCup&&!canFinger&&(
+        <div style={{padding:"10px 24px",background:"rgba(255,215,0,0.08)",border:"1px solid rgba(255,215,0,0.3)",borderRadius:10,fontSize:10,color:"rgba(255,215,0,0.6)",letterSpacing:2,textAlign:"center",marginBottom:10}}>
+          {rimShooterRef.current===1&&!isMulti?`⏳ CPU defending... ${rimCD}s`:`😮 ${rimCD}s...`}
+        </div>
+      )}
+
+      {/* Game over */}
+      {phase==="over" && (
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
+          <div style={{fontSize:24,fontWeight:900,letterSpacing:4,color:winner===1?"#27ae60":"#e74c3c",textShadow:`0 0 26px ${winner===1?"#27ae60":"#e74c3c"}`,animation:"popIn .4s ease"}}>
+            {winnerName}
+          </div>
+          {winner===1&&xpRef.current>0&&<div style={{fontSize:10,color:"#f5a62366",letterSpacing:2}}>+{xpRef.current} XP earned 🎯</div>}
+          {winner===2&&xpLostRef.current>0&&<div style={{fontSize:10,color:"#e74c3c55",letterSpacing:2}}>-{xpLostRef.current} XP lost 😬</div>}
+          <div style={{display:"flex",gap:10,marginTop:4}}>
+            <button onPointerDown={()=>onGameEnd(xpRef.current,xpLostRef.current,gSt.current)} style={{padding:"12px 20px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,color:"#444",fontWeight:900,fontSize:13,letterSpacing:2,cursor:"pointer",fontFamily:"'Courier New',monospace"}}>MENU</button>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes popIn     {from{opacity:0;transform:scale(.88) translateY(6px);}to{opacity:1;transform:scale(1) translateY(0);}}
+        @keyframes ripple    {from{transform:translate(-50%,-50%) scale(.3);opacity:1;}to{transform:translate(-50%,-50%) scale(3.2);opacity:0;}}
+        @keyframes heatPulse {from{opacity:.7;}to{opacity:1;}}
+        @keyframes rimPulse  {from{box-shadow:0 0 14px 4px gold;}to{box-shadow:0 0 28px 12px gold,0 0 50px goldenrod;}}
+        button:hover:not(:disabled){filter:brightness(1.12);transform:translateY(-1px);}
+        button:active{transform:translateY(0);}
+      `}</style>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  ROOT APP
+// ════════════════════════════════════════════════════════════════
+export default function App() {
+  const [screen,  setScreen]  = useState("menu");
+  const [mode,    setMode]    = useState("cpu");
+  const [profile, setProfile] = useState({
+    xp:        0,
+    tokens:    STARTING_TOKENS,
+    tournWins: 0,
+    stats: {
+      wins:0, losses:0,
+      cupsMade:0, cupsAttempted:0,
+      bouncesMade:0, fireStreaks:0,
+      fingerAttempts:0, fingerSaves:0, fingerMisses:0,
+    },
+  });
+
+  const leaderboard = useMemo(() => buildLeaderboard(), []);
+
+  const updateProfile = (upd) => setProfile(p => ({...p,...upd}));
+
+  const handleGameEnd = (earned, lost, gameSt) => {
+    setProfile(p => ({
+      ...p,
+      xp:     Math.max(0, p.xp + earned - lost),
+      tokens: (() => {
+        let t = p.tokens;
+        if (mode==="match" && gameSt.won)  t = t - MATCH_BUYIN + MATCH_PAYOUT;
+        if (mode==="match" && !gameSt.won) t = Math.max(0, t - MATCH_BUYIN);
+        return t;
+      })(),
+      stats: {
+        wins:           p.stats.wins           + (gameSt.won?1:0),
+        losses:         p.stats.losses         + (gameSt.won?0:1),
+        cupsMade:       p.stats.cupsMade       + gameSt.cupsMade,
+        cupsAttempted:  p.stats.cupsAttempted  + gameSt.cupsAttempted,
+        bouncesMade:    p.stats.bouncesMade    + gameSt.bouncesMade,
+        fireStreaks:    p.stats.fireStreaks     + gameSt.fireStreaks,
+        fingerAttempts: p.stats.fingerAttempts + gameSt.fingerAttempts,
+        fingerSaves:    p.stats.fingerSaves    + gameSt.fingerSaves,
+        fingerMisses:   p.stats.fingerMisses   + gameSt.fingerMisses,
+      },
+    }));
+    setScreen("menu");
+  };
+
+  if (screen==="stats") return (
+    <StatsScreen
+      stats={profile.stats} xp={profile.xp}
+      tokens={profile.tokens} tournWins={profile.tournWins}
+      leaderboard={leaderboard} onBack={()=>setScreen("menu")}
+    />
+  );
+
+  if (screen==="tournament") return (
+    <Tournament
+      profile={profile} onBack={()=>setScreen("menu")}
+      onUpdateProfile={updateProfile}
+    />
+  );
+
+  if (screen==="game") return (
+    <Game
+      mode={mode==="multi"?"multi":"cpu"}
+      playerXp={profile.xp}
+      tokens={profile.tokens}
+      context={mode==="match"?"match":null}
+      onGameEnd={handleGameEnd}
+    />
+  );
+
+  return (
+    <Menu
+      profile={profile}
+      onSelect={(m)=>{setMode(m);setScreen("game");}}
+      onStats={()=>setScreen("stats")}
+      onTournament={()=>setScreen("tournament")}
+    />
+  );
+}
