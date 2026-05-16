@@ -1,0 +1,1253 @@
+import { useState, useRef } from "react";
+
+// ── Constants ─────────────────────────────────────────────────
+const RANKS = [
+  { name:"Rookie",   xp:0,    icon:"🥉", color:"#8B6914" },
+  { name:"Amateur",  xp:150,  icon:"🥈", color:"#9e9e9e" },
+  { name:"Semi-Pro", xp:400,  icon:"🥇", color:"#DAA520" },
+  { name:"Pro",      xp:800,  icon:"💎", color:"#29B6F6" },
+  { name:"Elite",    xp:1500, icon:"🔥", color:"#FF7043" },
+  { name:"Legend",   xp:2500, icon:"⚡", color:"#BA68C8" },
+  { name:"HighClass",xp:8000, icon:"👑", color:"#F5C030" },
+];
+const getRank = (xp) => {
+  for (let i = RANKS.length - 1; i >= 0; i--) {
+    if (xp >= RANKS[i].xp) return i;
+  }
+  return 0;
+};
+
+const MATCH_BUYIN  = 5;
+const MATCH_PAY    = 8;
+const MATCH_HOUSE  = 2;
+const TOURN_BUYIN  = 10;
+const TOURN_PAY    = 60;
+const TOURN_HOUSE  = 20;
+const TOURN_POT    = 80;
+const NFT_WINS     = 3;
+const HIT_R        = 7.5;
+const RIM_PROB     = 1 / 8;
+const RIM_MS       = 2200;
+
+// Cup positions [x%, y%] within each rack half
+const TOP_POS = [
+  [17,5],[39,5],[61,5],[83,5],
+  [28,23],[50,23],[72,23],
+  [39,41],[61,41],
+  [50,59],
+];
+const BOT_POS = [
+  [50,41],
+  [39,59],[61,59],
+  [28,77],[50,77],[72,77],
+  [17,95],[39,95],[61,95],[83,95],
+];
+// Top rack: y maps to 0–42% of table. Bot: 58–100%.
+const toFull = (side, lx, ly) => ({
+  x: lx,
+  y: side === "top" ? ly * 0.42 : 58 + ly * 0.42,
+});
+
+const COD = [0, 3, 9, 5]; // corner + center indices
+
+const ACHIEVEMENTS = [
+  { id:"first",   icon:"🩸", name:"First Blood",    desc:"Sink your first cup",        chk: (s)      => s.made >= 1 },
+  { id:"heat",    icon:"🌡️", name:"Heating Up",     desc:"2 makes in a row",           chk: (s)      => s.streak >= 2 },
+  { id:"fire",    icon:"🔥", name:"On Fire",         desc:"3 in a row — balls back",    chk: (s)      => s.streak >= 3 },
+  { id:"bounce",  icon:"🏀", name:"Bouncer",         desc:"Land a bounce shot",         chk: (s)      => (s.bounces||0) >= 1 },
+  { id:"double",  icon:"🎳", name:"Double Bounce",   desc:"Double bounce — 3 cups",     chk: (s)      => (s.doubles||0) >= 1 },
+  { id:"island",  icon:"🏝️", name:"Island Hopper",  desc:"Sink a called island shot",  chk: (s)      => (s.islands||0) >= 1 },
+  { id:"finger",  icon:"🫵", name:"Fingermaster",    desc:"Finger out a rimming shot",  chk: (s)      => (s.fingers||0) >= 1 },
+  { id:"cod",     icon:"☠️", name:"Circle of Death", desc:"Win via Circle of Death",    chk: (s)      => (s.cod||0) >= 1 },
+  { id:"clutch",  icon:"💪", name:"Clutch",          desc:"Win with 1 cup left",        chk: (s)      => s.won && s.clutch },
+  { id:"perfect", icon:"👑", name:"Flawless",        desc:"Win without missing",        chk: (s)      => s.won && s.misses === 0 },
+  { id:"hc",      icon:"💎", name:"HighClass",       desc:"Reach HighClass rank",       chk: (_,xp)   => xp >= 8000 },
+  { id:"nft",     icon:"🖼️", name:"NFT Earner",     desc:"Win 3 tournaments",          chk: (_,__,tw) => tw >= NFT_WINS },
+];
+
+// ── Audio ─────────────────────────────────────────────────────
+function sfx(type) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const tone = (freq, wave, start, dur, vol = 0.22) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = wave;
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(vol, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur);
+    };
+    const noise = (start, dur, vol = 0.12) => {
+      const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource();
+      const gain = ctx.createGain();
+      const filt = ctx.createBiquadFilter();
+      src.buffer = buf;
+      filt.type = "bandpass";
+      filt.frequency.value = 700;
+      src.connect(filt);
+      filt.connect(gain);
+      gain.connect(ctx.destination);
+      gain.gain.setValueAtTime(vol, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      src.start(ctx.currentTime + start);
+      src.stop(ctx.currentTime + start + dur);
+    };
+    if (type === "splash")  { noise(0, .13, .28); tone(520,"sine",0,.07,.44); tone(260,"sine",.05,.25,.3); }
+    if (type === "bounce")  { tone(290,"square",0,.09,.2); tone(170,"square",.07,.1,.14); noise(0,.06,.09); }
+    if (type === "rim")     { tone(680,"sine",0,.05,.5); tone(640,"sine",.04,.08,.4); tone(600,"sine",.08,.06,.3); }
+    if (type === "saved")   { tone(400,"sine",0,.06,.4); tone(500,"sine",.05,.08,.45); tone(640,"sine",.1,.1,.4); }
+    if (type === "fire")    { tone(660,"sine",0,.08,.3); tone(880,"sine",.07,.1,.35); tone(1100,"sine",.15,.12,.3); }
+    if (type === "miss")    { tone(190,"sawtooth",0,.19,.13); }
+    if (type === "win")     { [523,659,784,1047].forEach((f,i) => tone(f,"sine",i*.13,.34,.22)); }
+    if (type === "lose")    { [370,270,180].forEach((f,i) => tone(f,"sawtooth",i*.14,.3,.18)); }
+    if (type === "cod")     { [200,150,100,80].forEach((f,i) => tone(f,"sawtooth",i*.1,.5,.3)); }
+    setTimeout(() => { try { ctx.close(); } catch(e) {} }, 3500);
+  } catch(e) {}
+}
+
+// ── Cup component ─────────────────────────────────────────────
+function Cup({ standing, hit, rimming, island, color, glow, onTap }) {
+  if (!standing) {
+    return (
+      <div style={{
+        width:28, height:4, borderRadius:"50%",
+        background:"rgba(255,255,255,0.03)",
+        border:"1px dashed rgba(255,255,255,0.06)",
+        margin:"17px auto 0",
+      }} />
+    );
+  }
+  const glowShadow = (rimming || island)
+    ? "0 0 22px 8px gold, 0 0 44px goldenrod"
+    : hit ? `0 0 22px 8px ${glow}` : "none";
+  const anim = rimming
+    ? "rimPulse .3s ease-in-out infinite alternate"
+    : island ? "islandGlow 1s ease-in-out infinite alternate" : "none";
+  return (
+    <div onClick={onTap} style={{ position:"relative", width:28, height:38, cursor:(rimming||island)?"pointer":"default" }}>
+      {island && (
+        <div style={{ position:"absolute", top:-14, left:"50%", transform:"translateX(-50%)", fontSize:7, color:"gold", whiteSpace:"nowrap", zIndex:5 }}>
+          📍ISLAND
+        </div>
+      )}
+      <div style={{
+        position:"absolute", inset:0,
+        clipPath:"polygon(3% 0%,97% 0%,80% 100%,20% 100%)",
+        background:`linear-gradient(112deg,rgba(255,255,255,0.28) 0%,${color} 22%,${color} 70%,rgba(0,0,0,0.42) 100%)`,
+        overflow:"hidden", boxShadow:glowShadow, animation:anim, transition:"box-shadow .2s",
+      }}>
+        <div style={{ position:"absolute", top:0, left:0, right:0, height:4, background:"rgba(255,255,255,0.78)" }} />
+        <div style={{ position:"absolute", top:4, left:"8%", right:"8%", height:7, background:"rgba(195,155,20,0.28)", borderRadius:"0 0 50% 50%" }} />
+        {[28,50,70].map(p => (
+          <div key={p} style={{ position:"absolute", top:`${p}%`, left:0, right:0, height:1.5, background:"rgba(0,0,0,0.2)" }} />
+        ))}
+        <div style={{ position:"absolute", top:"8%", left:"5%", width:"9%", bottom:"8%", background:"rgba(255,255,255,0.18)", borderRadius:2 }} />
+      </div>
+      <div style={{ position:"absolute", bottom:-5, left:"15%", right:"15%", height:4, borderRadius:"50%", background:"rgba(0,0,0,0.5)", filter:"blur(3px)" }} />
+    </div>
+  );
+}
+
+// ── XP Bar ────────────────────────────────────────────────────
+function XpBar({ xp }) {
+  const ri = getRank(xp);
+  const r = RANKS[ri];
+  const next = RANKS[ri + 1];
+  const pct = next ? Math.min(((xp - r.xp) / (next.xp - r.xp)) * 100, 100) : 100;
+  return (
+    <div style={{ width:"100%", maxWidth:340, marginBottom:8 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, letterSpacing:2, marginBottom:4 }}>
+        <span style={{ color:r.color }}>{r.icon} {r.name.toUpperCase()}</span>
+        <span style={{ color:"#2a2a2a" }}>{xp.toLocaleString()} XP{next ? ` → ${next.xp.toLocaleString()}` : ""}</span>
+      </div>
+      <div style={{ height:5, background:"rgba(255,255,255,0.05)", borderRadius:3, overflow:"hidden" }}>
+        <div style={{ height:"100%", width:`${pct}%`, background:`linear-gradient(90deg,${r.color}88,${r.color})`, transition:"width 1s", borderRadius:3 }} />
+      </div>
+    </div>
+  );
+}
+
+// ── Button ────────────────────────────────────────────────────
+function Btn({ children, onClick, c1="#f5a623", c2="#a05e06", tc="#000", disabled=false, small=false }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        padding: small ? "10px 18px" : "15px 0",
+        background: disabled ? "rgba(255,255,255,0.05)" : `linear-gradient(135deg,${c1},${c2})`,
+        border: "none", borderRadius:10,
+        color: disabled ? "#333" : tc,
+        fontWeight:900, fontSize: small ? 10 : 13,
+        letterSpacing:3, cursor: disabled ? "default" : "pointer",
+        width:"100%",
+        boxShadow: disabled ? "none" : `0 0 22px ${c1}44`,
+        transition:"all .18s",
+        fontFamily:"'Courier New',monospace",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+// ── Game ──────────────────────────────────────────────────────
+function Game({ mode, xp:initXp, tokens:initTok, unlocked:initUnl, tournWins, context, onEnd }) {
+  const P1C = "#cc2020"; const P1G = "#ff4444";
+  const P2C = "#1455c0"; const P2G = "#4488ff";
+  const p2Name = mode === "multi" ? "P2" : "CPU";
+
+  const [topCups,    setTopCups]    = useState(Array(10).fill(true));
+  const [botCups,    setBotCups]    = useState(Array(10).fill(true));
+  const [phase,      setPhase]      = useState("aim");
+  const [turn,       setTurn]       = useState(1);
+  const [soloShots,  setSoloShots]  = useState(2);
+  const [msg,        setMsg]        = useState("▲ Flick UP · ▼ Flick DOWN = bounce");
+  const [ball,       setBall]       = useState(null);
+  const [ripples,    setRipples]    = useState([]);
+  const [cFlash,     setCFlash]     = useState(false);
+  const [rFlash,     setRFlash]     = useState(null);
+  const [sFlash,     setSFlash]     = useState(null);
+  const [winner,     setWinner]     = useState(null);
+  const [scores,     setScores]     = useState({ p1:0, p2:0 });
+  const [xp,         setXp]         = useState(initXp);
+  const [tokens,     setTokens]     = useState(initTok);
+  const [unlocked,   setUnlocked]   = useState(initUnl);
+  const [popup,      setPopup]      = useState(null);
+  const [xpFlash,    setXpFlash]    = useState(null);
+  const [rimState,   setRimState]   = useState(null);
+  const [rimCD,      setRimCD]      = useState(0);
+  const [islandCup,  setIslandCup]  = useState(null);
+  const [islandOn,   setIslandOn]   = useState(false);
+  const [streak,     setStreak]     = useState(0);
+  const [onFire,     setOnFire]     = useState(false);
+  const [codProg,    setCodProg]    = useState({ 1: new Set(), 2: new Set() });
+  const [stats,      setStats]      = useState({ made:0, misses:0, streak:0, bounces:0, doubles:0, islands:0, fingers:0, cod:0 });
+
+  // refs (avoid stale closures)
+  const tableRef    = useRef(null);
+  const animRef     = useRef(null);
+  const rimAnimRef  = useRef(null);
+  const rimTimerRef = useRef(null);
+  const rimIntRef   = useRef(null);
+  const rimSRef     = useRef(null);
+  const cpuFingRef  = useRef(null);
+  const lastTapRef  = useRef(0);
+  const dragRef     = useRef(null);
+  const phaseRef    = useRef("aim");
+  const turnRef     = useRef(1);
+  const shotsRef    = useRef(2);
+  const fireRef     = useRef(false);
+  const streakRef   = useRef(0);
+  const winnerRef   = useRef(null);
+  const topRef      = useRef(topCups);
+  const botRef      = useRef(botCups);
+  const xpRef       = useRef(initXp);
+  const tokRef      = useRef(initTok);
+  const unlRef      = useRef(initUnl);
+  const islandRef   = useRef(null);
+  const islandOnRef = useRef(false);
+  const codRef      = useRef({ 1: new Set(), 2: new Set() });
+  const codBrokRef  = useRef({ 1: false, 2: false });
+  const statsRef    = useRef(stats);
+
+  topRef.current   = topCups;
+  botRef.current   = botCups;
+  xpRef.current    = xp;
+  tokRef.current   = tokens;
+  unlRef.current   = unlocked;
+  statsRef.current = stats;
+
+  // ── Helpers ───────────────────────────────────────────────
+  const flashScreen = (t) => { setSFlash(t); setTimeout(() => setSFlash(null), 430); };
+  const flashCenter = () => { setCFlash(true); setTimeout(() => setCFlash(false), 280); };
+  const flashRail   = (w) => { setRFlash(w);  setTimeout(() => setRFlash(null),  280); };
+
+  const spawnRipple = (side, idx) => {
+    const id = Date.now() + Math.random();
+    setRipples(prev => [...prev, { id, side, idx }]);
+    setTimeout(() => setRipples(prev => prev.filter(r => r.id !== id)), 800);
+  };
+
+  const gainXp = (amt) => {
+    const nx = xpRef.current + amt;
+    const oldR = getRank(xpRef.current);
+    const newR = getRank(nx);
+    setXp(nx); xpRef.current = nx;
+    setXpFlash(`+${amt} XP`);
+    setTimeout(() => setXpFlash(null), 1400);
+    if (newR > oldR) {
+      setPopup({ icon: RANKS[newR].icon, name:`RANK UP — ${RANKS[newR].name}!`, desc:"New rank unlocked!" });
+      setTimeout(() => setPopup(null), 4000);
+    }
+  };
+
+  const loseXp = () => {
+    const loss = Math.floor(xpRef.current * 0.25);
+    const nx = Math.max(0, xpRef.current - loss);
+    const oldR = getRank(xpRef.current);
+    const newR = getRank(nx);
+    setXp(nx); xpRef.current = nx;
+    setXpFlash(`-${loss} XP`);
+    setTimeout(() => setXpFlash(null), 1400);
+    if (newR < oldR) {
+      setPopup({ icon:"⬇️", name:"RANK DOWN", desc:`Back to ${RANKS[newR].name}` });
+      setTimeout(() => setPopup(null), 3500);
+    }
+  };
+
+  const award = (s) => {
+    ACHIEVEMENTS.forEach(a => {
+      if (!unlRef.current.includes(a.id) && a.chk(s, xpRef.current, tournWins)) {
+        setUnlocked(prev => { const u = [...prev, a.id]; unlRef.current = u; return u; });
+        setPopup({ icon:a.icon, name:a.name, desc:a.desc });
+        setTimeout(() => setPopup(null), 3400);
+      }
+    });
+  };
+
+  const detectIsland = (cups, pos, side) => {
+    const st = cups.map((c,i) => c ? i : -1).filter(i => i !== -1);
+    if (st.length <= 1) { setIslandCup(null); islandRef.current = null; return; }
+    let found = null;
+    for (const idx of st) {
+      const [x1, y1] = pos[idx];
+      const hasNeighbor = st.some(j => {
+        if (j === idx) return false;
+        const [x2, y2] = pos[j];
+        return Math.sqrt((x1-x2)**2 + (y1-y2)**2) < 30;
+      });
+      if (!hasNeighbor) { found = { side, idx }; break; }
+    }
+    setIslandCup(found); islandRef.current = found;
+  };
+
+  const checkCod = (shooter, idx) => {
+    if (codBrokRef.current[shooter]) return false;
+    if (!COD.includes(idx)) { codBrokRef.current[shooter] = true; return false; }
+    const p = new Set(codRef.current[shooter]); p.add(idx);
+    codRef.current[shooter] = p;
+    setCodProg(prev => ({ ...prev, [shooter]: p }));
+    return p.size === 4;
+  };
+
+  // ── Arc animation ─────────────────────────────────────────
+  const animChain = (segments, onDone) => {
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    let si = 0;
+    const next = () => {
+      if (si >= segments.length) { setBall(null); onDone(); return; }
+      const seg = segments[si++];
+      if (seg.flash === "center") { flashCenter(); sfx("bounce"); }
+      if (seg.flash === "top")    { flashRail("top");    sfx("bounce"); }
+      if (seg.flash === "bottom") { flashRail("bottom"); sfx("bounce"); }
+      const t0 = performance.now();
+      const tick = (now) => {
+        const raw  = Math.min((now - t0) / seg.dur, 1);
+        const ease = raw < 0.5 ? 2*raw*raw : -1 + (4 - 2*raw)*raw;
+        setBall({
+          x: seg.s.x + (seg.e.x - seg.s.x) * ease,
+          y: seg.s.y + (seg.e.y - seg.s.y) * ease - seg.h * Math.sin(Math.PI * raw),
+        });
+        if (raw < 1) animRef.current = requestAnimationFrame(tick);
+        else next();
+      };
+      animRef.current = requestAnimationFrame(tick);
+    };
+    next();
+  };
+
+  // ── Sink cups ─────────────────────────────────────────────
+  const sinkCups = (toRemove, side, shooter, shotType) => {
+    const setCups  = side === "top" ? setTopCups : setBotCups;
+    const cupsRef  = side === "top" ? topRef : botRef;
+    const pos      = side === "top" ? TOP_POS : BOT_POS;
+    const next     = [...cupsRef.current];
+    toRemove.forEach(i => { next[i] = false; });
+    setCups(next); cupsRef.current = next;
+    toRemove.forEach(i => spawnRipple(side, i));
+    flashScreen(shooter === 1 ? "p1" : "p2");
+    sfx("splash");
+
+    const isCod    = toRemove.length === 1 && checkCod(shooter, toRemove[0]);
+    const remaining = next.filter(Boolean).length;
+
+    // Streak
+    const ns = streakRef.current + 1;
+    streakRef.current = ns; setStreak(ns);
+    if (ns >= 3) { fireRef.current = true; setOnFire(true); sfx("fire"); }
+
+    // XP
+    let xpAmt = 5 * toRemove.length;
+    if (shotType === "bounce") xpAmt += 15;
+    if (shotType === "double") xpAmt += 25;
+    if (ns >= 3) xpAmt += 10;
+    if (islandOnRef.current) xpAmt += 20;
+    gainXp(xpAmt);
+
+    // Stats
+    const newStats = {
+      ...statsRef.current,
+      made:    statsRef.current.made + toRemove.length,
+      streak:  ns,
+      bounces: (statsRef.current.bounces || 0) + (shotType === "bounce" ? 1 : 0),
+      doubles: (statsRef.current.doubles || 0) + (shotType === "double" ? 1 : 0),
+      islands: (statsRef.current.islands || 0) + (islandOnRef.current ? 1 : 0),
+    };
+    setStats(newStats); statsRef.current = newStats;
+    award(newStats);
+
+    setIslandOn(false); islandOnRef.current = false;
+
+    if (isCod) {
+      sfx("cod");
+      const fs = { ...newStats, cod:1, won:true };
+      setStats(fs); statsRef.current = fs;
+      setWinner(shooter); winnerRef.current = shooter;
+      phaseRef.current = "over"; setPhase("over");
+      setScores(s => shooter === 1 ? { ...s, p1: s.p1+1 } : { ...s, p2: s.p2+1 });
+      setMsg("☠️ CIRCLE OF DEATH — INSTANT WIN!");
+      gainXp(80);
+      award(fs);
+      setTimeout(() => onEnd({ winner:shooter, xp:xpRef.current, tokens:tokRef.current, unlocked:unlRef.current }), 600);
+      return;
+    }
+
+    if (remaining === 0) {
+      const fs = { ...newStats, won:true, clutch: remaining <= 1 };
+      setStats(fs); statsRef.current = fs;
+      sfx(shooter === 1 ? "win" : "lose");
+      if (shooter === 1) gainXp(60); else loseXp();
+      if (context === "match" && shooter === 1) { setTokens(t => t + MATCH_PAY); tokRef.current += MATCH_PAY; }
+      if (context === "match" && shooter === 2) { setTokens(t => Math.max(0, t - MATCH_BUYIN)); tokRef.current = Math.max(0, tokRef.current - MATCH_BUYIN); }
+      setWinner(shooter); winnerRef.current = shooter;
+      phaseRef.current = "over"; setPhase("over");
+      setScores(s => shooter === 1 ? { ...s, p1: s.p1+1 } : { ...s, p2: s.p2+1 });
+      setMsg(shooter === 1 ? "🏆 YOU WIN!" : "💀 DEFEAT!");
+      award(fs);
+      setTimeout(() => onEnd({ winner:shooter, xp:xpRef.current, tokens:tokRef.current, unlocked:unlRef.current }), 600);
+      return;
+    }
+
+    // Detect island on opponent rack
+    detectIsland(
+      side === "top" ? tRef.current : bRef.current,
+      pos, side
+    );
+
+    advanceTurn(shooter, "hit");
+  };
+
+  // ── Miss ──────────────────────────────────────────────────
+  const handleMiss = (shooter) => {
+    sfx("miss");
+    streakRef.current = 0; setStreak(0);
+    fireRef.current = false; setOnFire(false);
+    islandOnRef.current = false; setIslandOn(false);
+    const ns = { ...statsRef.current, misses: statsRef.current.misses + 1 };
+    setStats(ns); statsRef.current = ns;
+    advanceTurn(shooter, "miss");
+  };
+
+  // ── Advance turn ──────────────────────────────────────────
+  const advanceTurn = (shooter, result) => {
+    if (winnerRef.current) return;
+    if (mode === "solo" && shooter === 1) {
+      // Fire = keep shooting
+      if (fireRef.current && result === "hit") {
+        phaseRef.current = "aim"; setPhase("aim");
+        setMsg("🔥 ON FIRE — shoot again!");
+        return;
+      }
+      const nextShots = shotsRef.current - 1;
+      shotsRef.current = nextShots; setSoloShots(nextShots);
+      if (nextShots > 0) {
+        phaseRef.current = "aim"; setPhase("aim");
+        setMsg("Shot 2 of 2 — flick!");
+        return;
+      }
+      // Turn over — CPU shoots
+      shotsRef.current = 2; setSoloShots(2);
+      phaseRef.current = "busy"; setPhase("busy");
+      setTimeout(runCpu, result === "miss" ? 1000 : 1600);
+    } else if (mode === "multi") {
+      const nxt = shooter === 1 ? 2 : 1;
+      turnRef.current = nxt; setTurn(nxt);
+      phaseRef.current = "aim"; setPhase("aim");
+      setTimeout(() => setMsg(`${nxt === 1 ? "P1" : "P2"} — flick to shoot!`), 800);
+    } else {
+      // CPU just finished
+      phaseRef.current = "aim"; setPhase("aim");
+      setTimeout(() => setMsg("▲ Flick UP · ▼ Flick DOWN = bounce"), 700);
+    }
+  };
+
+  // ── Rim mechanic ──────────────────────────────────────────
+  const startRim = (shooter, side, idx, cupPos, toRemove) => {
+    const defHuman = mode === "multi" || (mode === "solo" && shooter === 1);
+    const rim = { shooter, side, idx, pos:cupPos, toRemove, defHuman };
+    setRimState(rim); rimSRef.current = rim;
+    sfx("rim");
+    const t0 = performance.now();
+    const orb = (now) => {
+      const prog = Math.min((now - t0) / RIM_MS, 1);
+      const angle = prog * 4 * Math.PI;
+      setBall({ x: cupPos.x + Math.cos(angle)*3.8, y: cupPos.y + Math.sin(angle)*1.8 });
+      if (prog < 1) rimAnimRef.current = requestAnimationFrame(orb);
+    };
+    rimAnimRef.current = requestAnimationFrame(orb);
+    const start = Date.now();
+    rimIntRef.current = setInterval(() => {
+      setRimCD(+(Math.max(0, (RIM_MS - (Date.now()-start)) / 1000)).toFixed(1));
+    }, 80);
+    rimTimerRef.current = setTimeout(() => resolveRim(false), RIM_MS);
+    if (mode === "solo" && shooter === 1 && Math.random() < 0.3) {
+      cpuFingRef.current = setTimeout(() => resolveRim(true), 500 + Math.random() * 700);
+    }
+    setMsg(defHuman ? "🫵 Double-tap the glowing cup to FINGER it!" : "⏳ Rimming...");
+  };
+
+  const resolveRim = (fingered) => {
+    const rim = rimSRef.current; if (!rim) return;
+    clearTimeout(rimTimerRef.current);
+    clearTimeout(cpuFingRef.current);
+    clearInterval(rimIntRef.current);
+    if (rimAnimRef.current) cancelAnimationFrame(rimAnimRef.current);
+    setBall(null); setRimState(null); rimSRef.current = null; setRimCD(0);
+    if (fingered) {
+      sfx("saved");
+      gainXp(20);
+      const ns = { ...statsRef.current, fingers: (statsRef.current.fingers||0) + 1 };
+      setStats(ns); statsRef.current = ns;
+      award(ns);
+      setMsg("🫵 FINGERED! Shot saved!");
+      handleMiss(rim.shooter);
+    } else {
+      sinkCups(rim.toRemove, rim.side, rim.shooter, "regular");
+    }
+  };
+
+  const onCupTap = (e, side, idx) => {
+    e.stopPropagation();
+    const rim = rimSRef.current;
+    if (!rim || rim.side !== side || rim.idx !== idx || !rim.defHuman) return;
+    const now = Date.now();
+    if (now - lastTapRef.current < 400) resolveRim(true);
+    lastTapRef.current = now;
+  };
+
+  // ── CPU auto-shoot ────────────────────────────────────────
+  const runCpu = () => {
+    if (winnerRef.current) return;
+    setMsg(`${p2Name} lining up...`);
+    const standing = botRef.current.map((c,i) => c ? i : -1).filter(i => i !== -1);
+    if (!standing.length) return;
+    const ri = getRank(xpRef.current);
+    const acc = [0.45,0.50,0.56,0.62,0.68,0.74,0.80][ri] || 0.56;
+    const tgt = standing[Math.floor(Math.random() * standing.length)];
+    const [tx, ty] = BOT_POS[tgt];
+    const fp = toFull("bottom", tx, ty);
+    const isHit = Math.random() < acc;
+    const endPos = isHit ? fp : {
+      x: Math.max(10, Math.min(90, fp.x + (Math.random()*20-10))),
+      y: Math.max(62, Math.min(96, fp.y + (Math.random()*12-6))),
+    };
+    animChain([{ s:{x:50,y:3}, e:endPos, h:18, dur:950 }], () => {
+      if (!isHit) { handleMiss(2); return; }
+      if (Math.random() < RIM_PROB) { startRim(2, "bottom", tgt, fp, [tgt]); return; }
+      sinkCups([tgt], "bottom", 2, "regular");
+    });
+  };
+
+  // ── Flick input ───────────────────────────────────────────
+  const getTablePct = (cx, cy) => {
+    const r = tableRef.current?.getBoundingClientRect();
+    if (!r) return null;
+    return { x: ((cx - r.left) / r.width) * 100, y: ((cy - r.top) / r.height) * 100 };
+  };
+
+  const onPtrDown = (e) => {
+    if (phaseRef.current !== "aim") return;
+    const pos = getTablePct(e.clientX, e.clientY); if (!pos) return;
+    const t = turnRef.current;
+    if (t === 1 && pos.y < 52) return;
+    if (t === 2 && pos.y > 48) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { sx: pos.x, sy: pos.y, t0: Date.now() };
+  };
+
+  const onPtrUp = (e) => {
+    const drag = dragRef.current; dragRef.current = null;
+    if (!drag) return;
+    const pos = getTablePct(e.clientX, e.clientY); if (!pos) return;
+    const dx = pos.x - drag.sx;
+    const dy = pos.y - drag.sy;
+    const mag = Math.sqrt(dx*dx + dy*dy);
+    if (mag < 6) return;
+    const spd = mag / Math.max(50, Date.now() - drag.t0);
+    executeShot(dx, dy, mag, spd, drag.sx);
+  };
+
+  const executeShot = (dx, dy, mag, spd, sx) => {
+    if (phaseRef.current !== "aim") return;
+    phaseRef.current = "busy"; setPhase("busy");
+    const shooter = turnRef.current;
+    const isP1 = shooter === 1;
+
+    // Direction validation
+    const towardOpp = isP1 ? (dy < 0) : (dy > 0);
+    if (!towardOpp && Math.abs(dy) < 8) {
+      phaseRef.current = "aim"; setPhase("aim");
+      setMsg(isP1 ? "▲ Flick UP toward opponent!" : "▼ Flick DOWN toward opponent!");
+      return;
+    }
+
+    // Shot type: flick toward own side = bounce
+    const isBounce = isP1 ? (dy > 0) : (dy < 0);
+    const isDouble  = isBounce && spd > 0.16;
+    const force     = Math.min(mag / 32, 1.0);
+    const hOff      = dx * 1.9;
+
+    const cupsRef  = isP1 ? topRef  : botRef;
+    const pos      = isP1 ? TOP_POS : BOT_POS;
+    const side     = isP1 ? "top"   : "bottom";
+    const startPos = isP1 ? { x:sx, y:96 } : { x:sx, y:4 };
+
+    const standing = cupsRef.current.map((c,i) => c ? i : -1).filter(i => i !== -1);
+    if (!standing.length) { phaseRef.current = "aim"; setPhase("aim"); return; }
+
+    const landX = Math.max(8, Math.min(92, 50 + hOff));
+    const landY = isP1
+      ? Math.max(3,  Math.min(40, 38 - force * 36))
+      : Math.max(62, Math.min(97, 62 + force * 36));
+
+    // Nearest cup to landing
+    let nearIdx = null; let nearDist = 999; let nearFull = null;
+    standing.forEach(idx => {
+      const fp = toFull(side, pos[idx][0], pos[idx][1]);
+      const d = Math.sqrt((fp.x-landX)**2 + (fp.y-landY)**2);
+      if (d < nearDist) { nearDist = d; nearIdx = idx; nearFull = fp; }
+    });
+
+    const adjHit = Math.max(4, HIT_R - getRank(xpRef.current) * 0.45);
+    const isHit  = nearDist < adjHit;
+    const endPos = isHit ? nearFull : { x:landX, y:landY };
+
+    // Build arc segments
+    const segs = [];
+    if (!isBounce) {
+      segs.push({ s:startPos, e:endPos, h:14+force*10, dur:1000-force*240 });
+    } else if (!isDouble) {
+      const mid = { x: 50 + (endPos.x-50)*0.5, y: 50 };
+      segs.push({ s:startPos, e:mid,    h:13, dur:520, flash:"center" });
+      segs.push({ s:mid,      e:endPos, h:9,  dur:500 });
+    } else {
+      const mid1 = { x: 50 + (endPos.x-50)*0.38, y: 50 };
+      const mid2 = { x: Math.max(8,Math.min(92, 50+(endPos.x-50)*0.75)), y: isP1?10:90 };
+      segs.push({ s:startPos, e:mid1,   h:12, dur:410, flash:"center" });
+      segs.push({ s:mid1,     e:mid2,   h:8,  dur:380, flash: isP1?"top":"bottom" });
+      segs.push({ s:mid2,     e:endPos, h:6,  dur:380 });
+    }
+
+    const shotType = isDouble ? "double" : isBounce ? "bounce" : "regular";
+
+    animChain(segs, () => {
+      if (!isHit) { handleMiss(shooter); return; }
+
+      // Build removal list
+      let toRemove = [nearIdx];
+      if (isDouble) {
+        const others = standing.filter(i => i !== nearIdx);
+        const pick = (arr, n) => {
+          const res = []; const a = [...arr];
+          while (res.length < n && a.length) {
+            res.push(a.splice(Math.floor(Math.random()*a.length), 1)[0]);
+          }
+          return res;
+        };
+        toRemove = [...new Set([nearIdx, ...pick(others, Math.min(2, others.length))])].slice(0, 3);
+      } else if (isBounce) {
+        const others = standing.filter(i => i !== nearIdx);
+        if (others.length) toRemove = [nearIdx, others[Math.floor(Math.random()*others.length)]];
+      }
+
+      // Island bonus
+      if (islandOnRef.current && islandRef.current?.side === side && islandRef.current?.idx === nearIdx) {
+        const others = standing.filter(i => i !== nearIdx && !toRemove.includes(i));
+        if (others.length) toRemove = [...new Set([...toRemove, others[0]])];
+      }
+
+      // Rim chance (not on double bounce)
+      if (!isDouble && Math.random() < RIM_PROB) {
+        startRim(shooter, side, nearIdx, nearFull, toRemove);
+        return;
+      }
+      sinkCups(toRemove, side, shooter, shotType);
+    });
+  };
+
+  const callIsland = () => {
+    if (!islandCup || islandOnRef.current || phaseRef.current !== "aim") return;
+    setIslandOn(true); islandOnRef.current = true;
+    setMsg("📍 Island called! Sink it for a bonus cup!");
+  };
+
+  // ── Render ────────────────────────────────────────────────
+  const topLeft = topCups.filter(Boolean).length;
+  const botLeft = botCups.filter(Boolean).length;
+  const ri = getRank(xp);
+  const r  = RANKS[ri];
+  const turnC = turn === 1 ? P1C : P2C;
+
+  return (
+    <div style={{
+      minHeight:"100vh",
+      background:"radial-gradient(ellipse at 25% 5%,#0d1a0d,#020602 70%)",
+      color:"#fff", fontFamily:"'Courier New',monospace",
+      display:"flex", flexDirection:"column", alignItems:"center",
+      padding:"10px 8px 22px", userSelect:"none", position:"relative",
+    }}>
+
+      {sFlash && (
+        <div style={{
+          position:"fixed", inset:0, pointerEvents:"none", zIndex:100,
+          background: sFlash === "p1" ? "rgba(39,174,96,0.16)" : "rgba(200,50,50,0.16)",
+          animation:"flash .43s ease-out forwards",
+        }} />
+      )}
+
+      {popup && (
+        <div style={{
+          position:"fixed", top:12, right:12, zIndex:999,
+          background:"linear-gradient(135deg,#120d00,#211700)",
+          border:"2px solid #f5a623", borderRadius:14,
+          padding:"12px 18px", boxShadow:"0 0 42px rgba(245,166,35,0.75)",
+          animation:"popIn .35s ease",
+        }}>
+          <div style={{ fontSize:8, color:"#555", letterSpacing:3, marginBottom:4 }}>NOTIFICATION</div>
+          <div style={{ fontSize:20 }}>{popup.icon} <b style={{ fontSize:13 }}>{popup.name}</b></div>
+          <div style={{ fontSize:10, color:"#f5a623", marginTop:3 }}>{popup.desc}</div>
+        </div>
+      )}
+
+      {xpFlash && (
+        <div style={{
+          position:"fixed", top:"48%", left:"50%", transform:"translate(-50%,-50%)",
+          fontSize:24, fontWeight:900, pointerEvents:"none", zIndex:200,
+          color: xpFlash.startsWith("+") ? "#f5a623" : "#e74c3c",
+          animation:"popIn .4s ease",
+          textShadow:`0 0 20px ${xpFlash.startsWith("+") ? "#f5a623" : "#e74c3c"}`,
+        }}>
+          {xpFlash}
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", width:"100%", maxWidth:350, marginBottom:6 }}>
+        <button
+          onClick={() => onEnd({ winner:null, xp:xpRef.current, tokens:tokRef.current, unlocked:unlRef.current })}
+          style={{ background:"none", border:"1px solid #1c1c1c", color:"#2e2e2e", borderRadius:6, padding:"4px 9px", fontSize:9, letterSpacing:2, cursor:"pointer" }}
+        >
+          ← QUIT
+        </button>
+        <div style={{ flex:1, textAlign:"center", fontSize:11, fontWeight:900, letterSpacing:4, background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>
+          HIGHCLASS 🍺 PONG
+        </div>
+        <div style={{ fontSize:10, color:r.color, letterSpacing:1 }}>{r.icon} {tokens}🪙</div>
+      </div>
+
+      <XpBar xp={xp} />
+
+      {context && (
+        <div style={{ fontSize:8, letterSpacing:3, color:"#1e1e1e", marginBottom:8, textAlign:"center" }}>
+          {context === "tournament" ? `🏆 TOURNAMENT — ${TOURN_POT}🪙 pot` : `🎮 MATCH — ${MATCH_PAY}🪙 payout`}
+        </div>
+      )}
+
+      {/* Scores */}
+      <div style={{ display:"flex", width:"100%", maxWidth:350, marginBottom:8, border:"1px solid rgba(255,255,255,0.06)", borderRadius:12, overflow:"hidden" }}>
+        {[{ n:"P1", s:scores.p1, c:P1C, t:1 },{ n:p2Name, s:scores.p2, c:P2C, t:2 }].map(sc => (
+          <div key={sc.t} style={{ flex:1, padding:"8px 0", textAlign:"center", background: turn===sc.t&&phase!=="over" ? `${sc.c}1c` : "rgba(255,255,255,0.02)", borderRight: sc.t===1 ? "1px solid rgba(255,255,255,0.06)" : "none", transition:"background .4s" }}>
+            <div style={{ fontSize:8, letterSpacing:3, color:sc.c, marginBottom:2 }}>{sc.n}</div>
+            <div style={{ fontSize:20, fontWeight:900 }}>{sc.s}</div>
+            {mode === "solo" && sc.t === 1 && <div style={{ fontSize:7, color:P1C, marginTop:2, letterSpacing:1 }}>SHOTS: {soloShots}</div>}
+          </div>
+        ))}
+      </div>
+
+      {(onFire || streak >= 2) && (
+        <div style={{ marginBottom:7, fontSize:10, letterSpacing:3, color: onFire?"#FF7043":"#DAA520", textShadow:`0 0 14px ${onFire?"#FF7043":"#DAA520"}`, animation:"fireGlow .5s ease-in-out infinite alternate" }}>
+          {onFire ? "🔥 ON FIRE — BALLS BACK!" : "🌡️ HEATING UP!"}
+        </div>
+      )}
+
+      {/* TABLE */}
+      <div
+        ref={tableRef}
+        onPointerDown={onPtrDown}
+        onPointerUp={onPtrUp}
+        onPointerLeave={onPtrUp}
+        style={{
+          width:"100%", maxWidth:350, height:700,
+          background:[
+            "repeating-linear-gradient(90deg,rgba(255,255,255,0.006) 0,rgba(255,255,255,0.006) 1px,transparent 1px,transparent 22px)",
+            "repeating-linear-gradient(0deg,rgba(0,0,0,0.04) 0,rgba(0,0,0,0.04) 1px,transparent 1px,transparent 30px)",
+            "linear-gradient(180deg,#091709 0%,#112512 35%,#142c16 50%,#112512 65%,#091709 100%)",
+          ].join(","),
+          borderRadius:22, border:"3px solid #27ae60",
+          boxShadow:"0 0 55px rgba(39,174,96,0.16),inset 0 0 90px rgba(0,0,0,0.7)",
+          position:"relative", overflow:"hidden", marginBottom:10,
+          touchAction:"none", cursor: phase==="aim" ? "crosshair" : "default",
+        }}
+      >
+        {/* Rails */}
+        {[
+          { top:0,    left:0, right:0,  height:4, background:"linear-gradient(90deg,#3c6,#27ae60,#3c6)",   shadow: rFlash==="top"    },
+          { bottom:0, left:0, right:0,  height:4, background:"linear-gradient(90deg,#3c6,#27ae60,#3c6)",   shadow: rFlash==="bottom" },
+          { top:0,    left:0, bottom:0, width:4,  background:"linear-gradient(180deg,#3c6,#27ae60,#3c6)",  shadow: false },
+          { top:0,    right:0,bottom:0, width:4,  background:"linear-gradient(180deg,#3c6,#27ae60,#3c6)",  shadow: false },
+        ].map((rail, i) => (
+          <div key={i} style={{
+            position:"absolute",
+            top:    rail.top    !== undefined ? rail.top    : undefined,
+            bottom: rail.bottom !== undefined ? rail.bottom : undefined,
+            left:   rail.left   !== undefined ? rail.left   : undefined,
+            right:  rail.right  !== undefined ? rail.right  : undefined,
+            height: rail.height,
+            width:  rail.width,
+            background: rail.background,
+            boxShadow: rail.shadow ? "0 0 20px 8px gold" : "none",
+            transition:"box-shadow .1s",
+          }} />
+        ))}
+
+        {/* Center line */}
+        <div style={{
+          position:"absolute", top:"50%", left:"4%", right:"4%", height:2,
+          transform:"translateY(-50%)",
+          background: cFlash ? "rgba(255,245,50,0.94)" : "rgba(255,255,255,0.09)",
+          boxShadow:  cFlash ? "0 0 28px 10px rgba(255,245,50,0.85)" : "none",
+          transition:"all .07s",
+        }} />
+
+        {/* Active side glow */}
+        {phase !== "over" && (
+          <div style={{
+            position:"absolute", pointerEvents:"none",
+            ...(turn === 1
+              ? { bottom:0, left:0, right:0, height:"34%", background:`linear-gradient(to top,${P1C}11,transparent)` }
+              : { top:0,    left:0, right:0, height:"34%", background:`linear-gradient(to bottom,${P2C}11,transparent)` }),
+            transition:"all .5s",
+          }} />
+        )}
+
+        {/* Labels */}
+        <div style={{ position:"absolute", top:10, left:"50%", transform:"translateX(-50%)", fontSize:7, letterSpacing:3, color:`${P2C}44` }}>
+          {p2Name} — {topLeft} CUPS
+        </div>
+        <div style={{ position:"absolute", bottom:10, left:"50%", transform:"translateX(-50%)", fontSize:7, letterSpacing:3, color:`${P1C}44` }}>
+          P1 — {botLeft} CUPS
+        </div>
+
+        {/* CoD indicator */}
+        {!codBrokRef.current[1] && codProg[1]?.size > 0 && (
+          <div style={{ position:"absolute", bottom:44, left:"50%", transform:"translateX(-50%)", fontSize:8, color:"rgba(255,40,40,0.55)", letterSpacing:2 }}>
+            ☠️ CoD {codProg[1].size}/4
+          </div>
+        )}
+
+        {/* Rim overlay */}
+        {rimState && (
+          <div style={{ position:"absolute", top:"50%", left:"50%", transform:"translate(-50%,-50%)", zIndex:50, background:"rgba(0,0,0,0.85)", borderRadius:12, padding:"10px 18px", textAlign:"center", border:"1px solid gold" }}>
+            <div style={{ fontSize:9, color:"#f5a623", letterSpacing:3, marginBottom:4 }}>⏳ RIMMING</div>
+            <div style={{ fontSize:24, color:"gold", fontWeight:900 }}>{rimCD}s</div>
+            {rimState.defHuman && <div style={{ fontSize:8, color:"#888", marginTop:3 }}>🫵 Double-tap!</div>}
+          </div>
+        )}
+
+        {/* Flick hint */}
+        {phase === "aim" && !rimState && (
+          <div style={{ position:"absolute", ...(turn===1?{bottom:7}:{top:7}), left:"50%", transform:"translateX(-50%)", fontSize:7, letterSpacing:2, color:`${turnC}55`, pointerEvents:"none" }}>
+            {turn === 1 ? "▲ FLICK YOUR HALF" : "▼ FLICK YOUR HALF"}
+          </div>
+        )}
+
+        {/* TOP cups */}
+        {TOP_POS.map(([lx,ly], i) => (
+          <div key={`t${i}`} style={{ position:"absolute", left:`${lx}%`, top:`${ly*0.42}%`, transform:"translate(-50%,-50%)" }}>
+            <Cup
+              standing={topCups[i]}
+              hit={ripples.some(r => r.side==="top" && r.idx===i)}
+              rimming={rimState?.side==="top" && rimState?.idx===i}
+              island={islandOn && islandCup?.side==="top" && islandCup?.idx===i}
+              color={P2C} glow={P2G}
+              onTap={(e) => onCupTap(e, "top", i)}
+            />
+          </div>
+        ))}
+
+        {/* BOT cups */}
+        {BOT_POS.map(([lx,ly], i) => (
+          <div key={`b${i}`} style={{ position:"absolute", left:`${lx}%`, top:`${58+ly*0.42}%`, transform:"translate(-50%,-50%)" }}>
+            <Cup
+              standing={botCups[i]}
+              hit={ripples.some(r => r.side==="bottom" && r.idx===i)}
+              rimming={rimState?.side==="bottom" && rimState?.idx===i}
+              island={islandOn && islandCup?.side==="bottom" && islandCup?.idx===i}
+              color={P1C} glow={P1G}
+              onTap={(e) => onCupTap(e, "bottom", i)}
+            />
+          </div>
+        ))}
+
+        {/* Ripples */}
+        {ripples.map(rip => {
+          const ps  = rip.side === "top" ? TOP_POS : BOT_POS;
+          const fp  = toFull(rip.side, ps[rip.idx][0], ps[rip.idx][1]);
+          const clr = rip.side === "top" ? P2G : P1G;
+          return (
+            <div key={rip.id} style={{
+              position:"absolute", left:`${fp.x}%`, top:`${fp.y}%`,
+              transform:"translate(-50%,-50%)",
+              width:30, height:30, borderRadius:"50%",
+              border:`2px solid ${clr}`,
+              animation:"ripple .7s ease-out forwards",
+              pointerEvents:"none", zIndex:25,
+            }} />
+          );
+        })}
+
+        {/* Ball */}
+        {ball && (
+          <div style={{
+            position:"absolute", left:`${ball.x}%`, top:`${ball.y}%`,
+            transform:"translate(-50%,-50%)",
+            width:13, height:13, borderRadius:"50%",
+            background:"radial-gradient(circle at 34% 30%,#fff,#ddd)",
+            boxShadow:"0 0 13px rgba(255,255,255,0.98)",
+            zIndex:30, pointerEvents:"none",
+          }} />
+        )}
+      </div>
+
+      {/* Status */}
+      <div style={{ fontSize:11, letterSpacing:2, color: turn===1?"#f5a623":"#5a9fd4", margin:"0 0 9px", minHeight:16, textAlign:"center" }}>
+        {msg}
+      </div>
+
+      {/* Island button */}
+      {islandCup && !islandOn && phase === "aim" && (
+        <button
+          onClick={callIsland}
+          style={{ padding:"8px 20px", background:"linear-gradient(135deg,#DAA520,#8B6914)", border:"none", borderRadius:8, color:"#000", fontWeight:900, fontSize:10, letterSpacing:2, cursor:"pointer", marginBottom:10, fontFamily:"'Courier New',monospace" }}
+        >
+          🏝️ CALL ISLAND SHOT
+        </button>
+      )}
+
+      {/* Game over */}
+      {phase === "over" && (
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:10, marginTop:4 }}>
+          <div style={{ fontSize:22, fontWeight:900, letterSpacing:4, color: winner===1?"#27ae60":"#e74c3c", textShadow:`0 0 26px ${winner===1?"#27ae60":"#e74c3c"}`, animation:"popIn .4s ease" }}>
+            {winner === 1 ? "🏆 VICTORY!" : "💀 DEFEAT!"}
+          </div>
+          {context === "match" && (
+            <div style={{ fontSize:10, color: winner===1?"#27ae6066":"#e74c3c55", letterSpacing:2 }}>
+              {winner === 1 ? `+${MATCH_PAY} 🪙 earned` : `-${MATCH_BUYIN} 🪙 lost`}
+            </div>
+          )}
+        </div>
+      )}
+
+      <style>{`
+        @keyframes popIn     { from{opacity:0;transform:scale(.88) translateY(5px);} to{opacity:1;transform:scale(1) translateY(0);} }
+        @keyframes ripple    { from{transform:translate(-50%,-50%) scale(.3);opacity:1;} to{transform:translate(-50%,-50%) scale(3.2);opacity:0;} }
+        @keyframes flash     { from{opacity:1;} to{opacity:0;} }
+        @keyframes rimPulse  { from{box-shadow:0 0 14px 4px gold;} to{box-shadow:0 0 28px 12px gold,0 0 50px goldenrod;} }
+        @keyframes islandGlow{ from{box-shadow:0 0 10px 3px gold;} to{box-shadow:0 0 24px 10px gold;} }
+        @keyframes fireGlow  { from{opacity:.8;} to{opacity:1;} }
+        button:hover:not(:disabled){filter:brightness(1.12);transform:translateY(-1px);}
+      `}</style>
+    </div>
+  );
+}
+
+// ── Tournament ────────────────────────────────────────────────
+const CPU_NAMES = ["ShotCaller","RimKing","BounceGod","CupSmasher","FlickMaster","TableLord","AlleyOop","DeepShot"];
+
+function Tournament({ profile, onBack, onUpdate }) {
+  const [step,     setStep]     = useState("lobby");
+  const [bracket,  setBracket]  = useState(null);
+
+  const { xp, tokens, unlocked, tournWins } = profile;
+  const canAfford = tokens >= TOURN_BUYIN;
+  const ri = getRank(xp);
+  const r  = RANKS[ri];
+
+  const startTournament = () => {
+    if (!canAfford) return;
+    onUpdate({ tokens: tokens - TOURN_BUYIN });
+    const players = ["YOU", ...CPU_NAMES.slice(0, 7)];
+    const qf = [[0,1],[2,3],[4,5],[6,7]].map(([a,b]) => ({ p1:players[a], p2:players[b], winner:null }));
+    setBracket({ rounds:[qf,[],[]], stage:0 });
+    setStep("bracket");
+  };
+
+  const resolveMatch = (playerWon) => {
+    setBracket(prev => {
+      const rounds = prev.rounds.map(r => r.map(m => ({...m})));
+      const stage  = prev.stage;
+      // Resolve all matches in current stage
+      rounds[stage] = rounds[stage].map(m => {
+        if (m.winner) return m;
+        if (m.p1 === "YOU" || m.p2 === "YOU") {
+          return { ...m, winner: playerWon ? "YOU" : (m.p1==="YOU" ? m.p2 : m.p1) };
+        }
+        return { ...m, winner: Math.random() < 0.5 ? m.p1 : m.p2 };
+      });
+      // Build next round
+      const winners = rounds[stage].map(m => m.winner).filter(Boolean);
+      if (winners.length >= 2) {
+        const next = [];
+        for (let i = 0; i < winners.length; i += 2) {
+          next.push({ p1: winners[i], p2: winners[i+1] || "BYE", winner: null });
+        }
+        rounds[stage + 1] = next;
+      }
+      return { rounds, stage: stage + 1 };
+    });
+
+    if (playerWon) {
+      onUpdate({ xp: profile.xp + 40 });
+    }
+  };
+
+  // Find current player match to play
+  const currentStage   = bracket ? Math.max(0, bracket.stage - 1) : 0;
+  const currentRound   = bracket?.rounds[currentStage] || [];
+  const playerMatch    = currentRound.find(m => (m.p1==="YOU"||m.p2==="YOU") && !m.winner);
+  const nextRound      = bracket?.rounds[bracket.stage] || [];
+  const playerInNext   = nextRound.some(m => m.p1==="YOU" || m.p2==="YOU");
+  const tournamentDone = bracket && !playerInNext && bracket.stage > 0;
+  const playerWonTourn = bracket?.rounds?.flat()?.find(m => m.winner==="YOU" && (m.p1==="BYE"||m.p2==="BYE" || bracket.rounds.indexOf(bracket.rounds.find(r=>r.includes(m))) === bracket.rounds.filter(r=>r.length>0).length-1));
+
+  const handleGameEnd = (result) => {
+    onUpdate({ xp: result.xp, tokens: result.tokens, unlocked: result.unlocked });
+    const won = result.winner === 1;
+    resolveMatch(won);
+    if (won && bracket && bracket.stage >= 3) {
+      // Won the final
+      const newWins = (profile.tournWins || 0) + 1;
+      onUpdate({ tokens: (profile.tokens - TOURN_BUYIN) + TOURN_PAY, tournWins: newWins });
+      setStep("won");
+    } else if (!won) {
+      setStep("lost");
+    } else {
+      setStep("bracket");
+    }
+  };
+
+  if (step === "game") {
+    return (
+      <Game
+        mode="solo"
+        xp={profile.xp}
+        tokens={profile.tokens}
+        unlocked={profile.unlocked}
+        tournWins={profile.tournWins || 0}
+        context="tournament"
+        onEnd={handleGameEnd}
+      />
+    );
+  }
+
+  if (step === "won") {
+    const tw = (profile.tournWins || 0) + 1;
+    return (
+      <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 30% 10%,#0f200f,#020702 70%)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Courier New',monospace", color:"#fff", padding:24, gap:16, textAlign:"center" }}>
+        <div style={{ fontSize:48 }}>🏆</div>
+        <div style={{ fontSize:22, fontWeight:900, letterSpacing:4, color:"#f5a623" }}>TOURNAMENT WON!</div>
+        <div style={{ fontSize:10, color:"#27ae6066", letterSpacing:2 }}>+{TOURN_PAY}🪙 earned · House gets {TOURN_HOUSE}🪙</div>
+        {tw >= NFT_WINS && (
+          <div style={{ padding:"12px 20px", background:"rgba(245,166,35,0.1)", border:"2px solid #f5a623", borderRadius:12 }}>
+            <div style={{ fontSize:20 }}>🖼️ NFT UNLOCKED!</div>
+            <div style={{ fontSize:9, color:"#f5a623", letterSpacing:2, marginTop:4 }}>Win 3 tournaments — HighClass NFT earned!</div>
+          </div>
+        )}
+        <div style={{ width:"100%", maxWidth:260 }}>
+          <Btn onClick={onBack} c1="#f5a623" c2="#a05e06" tc="#000" small>← BACK TO MENU</Btn>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === "lost") {
+    return (
+      <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 30% 10%,#0f200f,#020702 70%)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Courier New',monospace", color:"#fff", padding:24, gap:16, textAlign:"center" }}>
+        <div style={{ fontSize:48 }}>💀</div>
+        <div style={{ fontSize:22, fontWeight:900, letterSpacing:4, color:"#e74c3c" }}>ELIMINATED</div>
+        <div style={{ fontSize:10, color:"#e74c3c44", letterSpacing:2 }}>Better luck next time</div>
+        <div style={{ width:"100%", maxWidth:260 }}>
+          <Btn onClick={onBack} c1="#f5a623" c2="#a05e06" tc="#000" small>← BACK TO MENU</Btn>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === "bracket" && bracket) {
+    const stageNames = ["QF","SF","FINAL"];
+    const playerNextMatch = bracket.rounds[bracket.stage]?.find(m => m.p1==="YOU" || m.p2==="YOU");
+    return (
+      <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 30% 10%,#0f200f,#020702 70%)", display:"flex", flexDirection:"column", alignItems:"center", fontFamily:"'Courier New',monospace", color:"#fff", padding:"18px 12px 28px", gap:10 }}>
+        <h2 style={{ fontSize:18, letterSpacing:4, margin:0, background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>🏆 BRACKET</h2>
+        <div style={{ fontSize:9, color:"#1e1e1e", letterSpacing:2 }}>{TOURN_POT}🪙 pot · Winner gets {TOURN_PAY}🪙 · House {TOURN_HOUSE}🪙</div>
+        <div style={{ display:"flex", gap:12, marginTop:4, overflowX:"auto" }}>
+          {bracket.rounds.map((rd, ri) => rd.length > 0 && (
+            <div key={ri} style={{ display:"flex", flexDirection:"column", gap:7, minWidth:88 }}>
+              <div style={{ fontSize:7, color:"#252525", letterSpacing:2, textAlign:"center" }}>{stageNames[ri] || `R${ri+1}`}</div>
+              {rd.map((m, mi) => (
+                <div key={mi} style={{ padding:"6px 8px", background:"rgba(255,255,255,0.03)", border:`1px solid ${(m.p1==="YOU"||m.p2==="YOU")?"rgba(245,166,35,0.3)":"rgba(255,255,255,0.05)"}`, borderRadius:7 }}>
+                  {[m.p1, m.p2].map((p, pi) => (
+                    <div key={pi} style={{ fontSize:9, color: m.winner===p?"#f5a623":p==="YOU"?"#27ae60":"#2a2a2a", fontWeight: m.winner===p?900:400, padding:"2px 0", letterSpacing:1 }}>
+                      {p === "YOU" ? "⭐ YOU" : (p || "TBD")}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {playerNextMatch && !playerNextMatch.winner && (
+          <div style={{ marginTop:10, padding:"14px 20px", background:"rgba(245,166,35,0.09)", border:"2px solid #f5a623", borderRadius:12, textAlign:"center", width:"100%", maxWidth:300 }}>
+            <div style={{ fontSize:9, color:"#f5a623", letterSpacing:3, marginBottom:6 }}>YOUR MATCH</div>
+            <div style={{ fontSize:13, marginBottom:12 }}>⭐ YOU vs {playerNextMatch.p1==="YOU" ? playerNextMatch.p2 : playerNextMatch.p1}</div>
+            <Btn onClick={() => setStep("game")} c1="#27ae60" c2="#1a6e3c" tc="#000" small>🎮 PLAY MATCH NOW</Btn>
+          </div>
+        )}
+        <div style={{ marginTop:8, width:"100%", maxWidth:300 }}>
+          <Btn onClick={onBack} c1="#1a1a1a" c2="#111" tc="#444" small>← BACK TO MENU</Btn>
+        </div>
+      </div>
+    );
+  }
+
+  // Lobby
+  return (
+    <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 30% 10%,#0f200f,#020702 70%)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Courier New',monospace", color:"#fff", padding:"24px 16px", gap:14 }}>
+      <div style={{ fontSize:9, color:r.color, letterSpacing:4 }}>{r.icon} {r.name.toUpperCase()}</div>
+      <div style={{ fontSize:36 }}>🏆</div>
+      <h2 style={{ margin:0, fontSize:20, letterSpacing:5, background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>TOURNAMENT</h2>
+      <div style={{ padding:"12px 20px", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:10, fontSize:9, letterSpacing:2, lineHeight:2.2, color:"#2a2a2a", textAlign:"center", maxWidth:280 }}>
+        8 players · Single elimination<br />
+        Buy-in: {TOURN_BUYIN}🪙 · Total pot: {TOURN_POT}🪙<br />
+        Winner: {TOURN_PAY}🪙 · House: {TOURN_HOUSE}🪙<br />
+        Win {NFT_WINS} tournaments → 🖼️ NFT badge
+      </div>
+      <div style={{ fontSize:10, color: canAfford?"#27ae60":"#e74c3c", letterSpacing:2 }}>Your tokens: {tokens}🪙</div>
+      <div style={{ width:"100%", maxWidth:280, display:"flex", flexDirection:"column", gap:10 }}>
+        <Btn onClick={startTournament} disabled={!canAfford} c1="#7b2fa0" c2="#4a1060" tc="#fff">🏆 ENTER ({TOURN_BUYIN}🪙)</Btn>
+        <Btn onClick={onBack} c1="#1a1a1a" c2="#111" tc="#444" small>← BACK</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ── Menu ──────────────────────────────────────────────────────
+function Menu({ profile, onSelect, onTournament }) {
+  const { xp, tokens, unlocked, tournWins } = profile;
+  const ri = getRank(xp);
+  const r  = RANKS[ri];
+  const hasNFT = (tournWins || 0) >= NFT_WINS;
+  return (
+    <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 30% 10%,#0f200f,#020702 70%)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Courier New',monospace", color:"#fff", padding:"20px 16px" }}>
+      {hasNFT && <div style={{ position:"absolute", top:16, right:16, fontSize:22 }} title="HighClass NFT">🖼️</div>}
+      <div style={{ fontSize:9, color:r.color, letterSpacing:5, marginBottom:4 }}>{r.icon} {r.name.toUpperCase()}</div>
+      <div style={{ fontSize:40, marginBottom:4 }}>🍺</div>
+      <div style={{ fontSize:13, fontWeight:900, letterSpacing:6, background:"linear-gradient(90deg,#a05e06,#f5c030,#a05e06)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:2 }}>HIGHCLASS</div>
+      <div style={{ fontSize:22, fontWeight:900, letterSpacing:4, color:"#f5c030", marginBottom:10 }}>🍺 PONG</div>
+      <XpBar xp={xp} />
+      <div style={{ fontSize:10, color:"#f5a623", letterSpacing:2, marginBottom:4 }}>{tokens}🪙 tokens</div>
+      {(tournWins||0) > 0 && (
+        <div style={{ fontSize:9, color:"#7b2fa0", letterSpacing:2, marginBottom:6 }}>
+          🏆 {tournWins} tournament win{tournWins!==1?"s":""}{hasNFT?" · 🖼️ NFT EARNED":""}
+        </div>
+      )}
+      <div style={{ fontSize:9, color:"#1a1a1a", letterSpacing:2, textAlign:"center", marginBottom:22, lineHeight:2.1, padding:"10px 14px", border:"1px dashed rgba(255,255,255,0.04)", borderRadius:8, maxWidth:280 }}>
+        ▲ Flick UP = regular · ▼ Flick DOWN = bounce<br />
+        ⚡ Fast DOWN = double bounce (3 cups)<br />
+        🏝️ Call island on lone cups · 🫵 Finger the rim<br />
+        ☠️ 3 corners + center = Circle of Death win<br />
+        💥 Solo: 2 shots · 3 in a row = balls back
+      </div>
+      <div style={{ display:"flex", flexDirection:"column", gap:10, width:"100%", maxWidth:280 }}>
+        <Btn onClick={() => onSelect("solo")}  c1="#f5a623" c2="#a05e06" tc="#000">🤖 VS CPU (Free)</Btn>
+        <Btn onClick={() => onSelect("match")} c1="#1e6fd4" c2="#0b3480" tc="#fff">🎮 MATCH — {MATCH_BUYIN}🪙</Btn>
+        <Btn onClick={onTournament}            c1="#7b2fa0" c2="#4a1060" tc="#fff">🏆 TOURNAMENT — {TOURN_BUYIN}🪙</Btn>
+      </div>
+      <div style={{ marginTop:20, display:"flex", flexWrap:"wrap", gap:5, justifyContent:"center", maxWidth:300 }}>
+        {ACHIEVEMENTS.map(a => {
+          const earned = unlocked.includes(a.id);
+          return <span key={a.id} title={a.desc} style={{ fontSize:12, opacity: earned ? 1 : 0.08 }}>{a.icon}</span>;
+        })}
+      </div>
+      <div style={{ marginTop:14, fontSize:8, color:"#181818", letterSpacing:3 }}>🔗 CONNECT WALLET · BET CRO · EARN REWARDS</div>
+    </div>
+  );
+}
+
+// ── Root ──────────────────────────────────────────────────────
+export default function App() {
+  const [screen,  setScreen]  = useState("menu");
+  const [mode,    setMode]    = useState("solo");
+  const [profile, setProfile] = useState({ xp:0, tokens:50, unlocked:[], tournWins:0 });
+
+  const updateProfile = (upd) => setProfile(p => ({ ...p, ...upd }));
+
+  const handleSelect = (m) => { setMode(m); setScreen("game"); };
+
+  const handleGameEnd = (result) => {
+    updateProfile({ xp: result.xp, tokens: result.tokens, unlocked: result.unlocked });
+    setScreen("menu");
+  };
+
+  if (screen === "tournament") {
+    return (
+      <Tournament
+        profile={profile}
+        onBack={() => setScreen("menu")}
+        onUpdate={updateProfile}
+      />
+    );
+  }
+
+  if (screen === "game") {
+    return (
+      <Game
+        mode={mode === "multi" ? "multi" : "solo"}
+        xp={profile.xp}
+        tokens={profile.tokens}
+        unlocked={profile.unlocked}
+        tournWins={profile.tournWins}
+        context={mode === "match" ? "match" : null}
+        onEnd={handleGameEnd}
+      />
+    );
+  }
+
+  return (
+    <Menu
+      profile={profile}
+      onSelect={handleSelect}
+      onTournament={() => setScreen("tournament")}
+    />
+  );
+}
