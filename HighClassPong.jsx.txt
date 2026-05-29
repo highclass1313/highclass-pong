@@ -1206,6 +1206,115 @@ function Menu({ profile, onSelect, onTournament }) {
   );
 }
 
+// ── Terms acceptance gate ─────────────────────────────────────
+const TERMS_KEY = "hcp_terms_v1";
+
+function TermsGate({ children }) {
+  const [accepted, setAccepted] = useState(() => {
+    try { return localStorage.getItem(TERMS_KEY) === "1"; } catch { return false; }
+  });
+  const [checked, setChecked] = useState(false);
+
+  if (accepted) return children;
+
+  const accept = () => {
+    try { localStorage.setItem(TERMS_KEY, "1"); } catch {}
+    setAccepted(true);
+  };
+
+  const overlay = {
+    position:"fixed", inset:0, background:"rgba(0,0,0,0.92)", zIndex:9999,
+    display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+    padding:"20px", fontFamily:"monospace",
+  };
+  const box = {
+    background:"#111", border:"1px solid #f5c030", borderRadius:12,
+    maxWidth:380, width:"100%", padding:"24px 20px", color:"#ddd",
+  };
+  const h1 = { fontSize:13, fontWeight:900, letterSpacing:4, color:"#f5c030", marginBottom:4, textAlign:"center" };
+  const h2 = { fontSize:9,  fontWeight:700, letterSpacing:3, color:"#888",    marginBottom:16, textAlign:"center" };
+  const section = { fontSize:9, lineHeight:1.7, color:"#aaa", marginBottom:10 };
+  const label = { display:"flex", alignItems:"flex-start", gap:8, fontSize:9, color:"#ccc", lineHeight:1.6, marginTop:14, cursor:"pointer" };
+
+  return (
+    <div style={overlay}>
+      <div style={box}>
+        <div style={h1}>⚠️ TERMS &amp; CONDITIONS</div>
+        <div style={h2}>READ CAREFULLY BEFORE ENTERING</div>
+
+        <div style={section}>
+          <strong style={{color:"#f5c030"}}>© 2025 HighClass Pong — All Rights Reserved.</strong><br />
+          The HighClass Pong name, logo, game mechanics, and smart contract are
+          proprietary intellectual property. Unauthorised copying, forking for
+          commercial purposes, or creating derivative works is prohibited.
+        </div>
+
+        <div style={section}>
+          <strong style={{color:"#f5a623"}}>18+ / LEGAL AGE REQUIREMENT</strong><br />
+          You must be at least 18 years old, or the legal age of majority in your
+          jurisdiction (whichever is higher), to participate in any wagering mode.
+          Free-play modes (VS CPU, 2-Player Local) have no age restriction.
+        </div>
+
+        <div style={section}>
+          <strong style={{color:"#f5a623"}}>GAMBLING &amp; FINANCIAL RISK DISCLAIMER</strong><br />
+          Match and Tournament modes involve wagering CRO cryptocurrency. Cryptocurrency
+          wagering may be illegal in your jurisdiction. You are solely responsible for
+          determining and complying with all applicable laws. The operator accepts
+          <strong> no liability</strong> for any financial losses, regardless of cause.
+          Only wager amounts you can afford to lose entirely.
+        </div>
+
+        <div style={section}>
+          <strong style={{color:"#f5a623"}}>CRONOS / CRYPTO.COM NOTICE</strong><br />
+          This application operates on the public Cronos blockchain and is independent
+          of Crypto.com Exchange. Compliance with Crypto.com's own terms of service
+          and any applicable exchange policies is your sole responsibility.
+        </div>
+
+        <div style={section}>
+          <strong style={{color:"#f5a623"}}>NO LEGAL DISPUTES</strong><br />
+          By entering you irrevocably waive any right to bring legal claims, lawsuits,
+          or class actions against the operator, its affiliates, or contributors arising
+          from your use of this platform. All outcomes are final.
+        </div>
+
+        <label style={label}>
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={e => setChecked(e.target.checked)}
+            style={{ marginTop:2, accentColor:"#f5c030", flexShrink:0 }}
+          />
+          <span>
+            I confirm I am 18+ (or legal age in my jurisdiction), I have read and
+            agree to the full{" "}
+            <a href="TERMS.md" target="_blank" rel="noreferrer" style={{color:"#f5c030"}}>
+              Terms &amp; Conditions
+            </a>
+            , and I accept all associated risks.
+          </span>
+        </label>
+
+        <button
+          onClick={accept}
+          disabled={!checked}
+          style={{
+            marginTop:18, width:"100%", padding:"12px 0", borderRadius:8,
+            border:"none", fontWeight:900, fontSize:11, letterSpacing:3,
+            cursor: checked ? "pointer" : "not-allowed",
+            background: checked ? "linear-gradient(90deg,#a05e06,#f5c030)" : "#333",
+            color: checked ? "#000" : "#666",
+            transition:"all 0.2s",
+          }}
+        >
+          {checked ? "ENTER HIGHCLASS PONG →" : "CHECK THE BOX TO CONTINUE"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Root ──────────────────────────────────────────────────────
 export default function App() {
   const [screen,  setScreen]  = useState("menu");
@@ -1223,33 +1332,39 @@ export default function App() {
 
   if (screen === "tournament") {
     return (
-      <Tournament
-        profile={profile}
-        onBack={() => setScreen("menu")}
-        onUpdate={updateProfile}
-      />
+      <TermsGate>
+        <Tournament
+          profile={profile}
+          onBack={() => setScreen("menu")}
+          onUpdate={updateProfile}
+        />
+      </TermsGate>
     );
   }
 
   if (screen === "game") {
     return (
-      <Game
-        mode={mode === "multi" ? "multi" : "solo"}
-        xp={profile.xp}
-        tokens={profile.tokens}
-        unlocked={profile.unlocked}
-        tournWins={profile.tournWins}
-        context={mode === "match" ? "match" : null}
-        onEnd={handleGameEnd}
-      />
+      <TermsGate>
+        <Game
+          mode={mode === "multi" ? "multi" : "solo"}
+          xp={profile.xp}
+          tokens={profile.tokens}
+          unlocked={profile.unlocked}
+          tournWins={profile.tournWins}
+          context={mode === "match" ? "match" : null}
+          onEnd={handleGameEnd}
+        />
+      </TermsGate>
     );
   }
 
   return (
-    <Menu
-      profile={profile}
-      onSelect={handleSelect}
-      onTournament={() => setScreen("tournament")}
-    />
+    <TermsGate>
+      <Menu
+        profile={profile}
+        onSelect={handleSelect}
+        onTournament={() => setScreen("tournament")}
+      />
+    </TermsGate>
   );
 }

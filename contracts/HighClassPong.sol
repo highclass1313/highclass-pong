@@ -3,18 +3,52 @@ pragma solidity ^0.8.20;
 
 // ═══════════════════════════════════════════════════════════════
 //  HIGHCLASS 🍺 PONG — Smart Contract
+//  © 2025 HighClass Pong. All Rights Reserved.
 //  Cronos Blockchain (Chain ID: 25)
 //
+//  COPYRIGHT NOTICE
+//  The HighClass Pong name, branding, game mechanics, and this
+//  smart contract are proprietary intellectual property. Unauthorised
+//  reproduction, forking for commercial use, or distribution of
+//  derivative works is prohibited without written permission.
+//
+//  LEGAL NOTICE — READ BEFORE INTERACTING
+//  By sending a transaction to this contract you irrevocably confirm:
+//  • You are 18 years of age or older (or the legal age of majority
+//    in your jurisdiction, whichever is higher).
+//  • Cryptocurrency wagering may be restricted or prohibited in your
+//    jurisdiction. You are solely responsible for determining and
+//    complying with all applicable laws.
+//  • Participation is entirely at your own risk. The contract operator
+//    accepts no liability whatsoever for any loss of funds, winnings
+//    foregone, or any other damages arising from use of this contract.
+//  • All outcomes are final. No refunds are issued except via the
+//    explicit cancelMatch function while a match remains OPEN.
+//  • By participating you waive any right to bring legal claims against
+//    the contract operator, its affiliates, or contributors.
+//  • This contract operates on the public Cronos blockchain and is
+//    independent of Crypto.com Exchange. Compliance with Crypto.com's
+//    terms of service is the user's own responsibility.
+//
 //  Handles:
-//  • Match betting (5 CRO buy-in, 8 CRO payout, 2 CRO house)
-//  • Tournament pools (10 CRO buy-in, 60 CRO payout, 20 CRO house)
-//  • NFT badge tracking (win 3 tournaments)
+//  • Match betting  (5 CRO buy-in · 8 CRO payout · 2 CRO house)
+//  • Tournaments    (10 CRO buy-in · 60 CRO payout · 20 CRO house)
+//  • NFT badge tracking (earn after 3 tournament wins)
 //  • House revenue withdrawal (owner only)
 // ═══════════════════════════════════════════════════════════════
 
 contract HighClassPong {
 
-    // ── Owner (you) ──────────────────────────────────────────
+    // ── Reentrancy guard (inline — no external dependency) ────
+    uint256 private _reentrancyStatus = 1; // 1 = not entered, 2 = entered
+    modifier nonReentrant() {
+        require(_reentrancyStatus != 2, "ReentrancyGuard: reentrant call");
+        _reentrancyStatus = 2;
+        _;
+        _reentrancyStatus = 1;
+    }
+
+    // ── Owner ─────────────────────────────────────────────────
     address public owner;
 
     // ── Match settings ────────────────────────────────────────
@@ -138,9 +172,8 @@ contract HighClassPong {
     }
 
     /// @notice Declare winner — only callable by owner (game server / oracle)
-    /// @dev In V2 this will be replaced by a verifiable on-chain result
     function resolveMatch(uint256 matchId, address winner)
-        external onlyOwner matchExists(matchId)
+        external onlyOwner matchExists(matchId) nonReentrant
     {
         Match storage m = matches[matchId];
         require(m.status == MatchStatus.ACTIVE, "Match not active");
@@ -152,10 +185,8 @@ contract HighClassPong {
         m.winner = winner;
         m.status = MatchStatus.COMPLETE;
 
-        // House cut
         houseBalance += MATCH_HOUSE;
 
-        // Pay winner
         playerWins[winner]++;
         playerMatches[m.player1]++;
         playerMatches[m.player2]++;
@@ -168,7 +199,7 @@ contract HighClassPong {
 
     /// @notice Cancel an open match and refund player1
     function cancelMatch(uint256 matchId)
-        external matchExists(matchId)
+        external matchExists(matchId) nonReentrant
     {
         Match storage m = matches[matchId];
         require(m.status == MatchStatus.OPEN,   "Can only cancel open matches");
@@ -213,7 +244,6 @@ contract HighClassPong {
         require(t.playerCount < 8,        "Tournament full");
         require(msg.value == TOURN_BUYIN, "Send exactly 10 CRO");
 
-        // Make sure player hasn't already joined
         for (uint256 i = 0; i < t.playerCount; i++) {
             require(t.players[i] != msg.sender, "Already joined");
         }
@@ -227,13 +257,12 @@ contract HighClassPong {
 
     /// @notice Declare tournament winner — owner only
     function resolveTournament(uint256 tournId, address winner)
-        external onlyOwner tournamentExists(tournId)
+        external onlyOwner tournamentExists(tournId) nonReentrant
     {
         Tournament storage t = tournaments[tournId];
         require(!t.complete,         "Already complete");
         require(t.playerCount == 8,  "Tournament not full");
 
-        // Verify winner is a tournament player
         bool isPlayer = false;
         for (uint256 i = 0; i < 8; i++) {
             if (t.players[i] == winner) { isPlayer = true; break; }
@@ -243,10 +272,8 @@ contract HighClassPong {
         t.winner   = winner;
         t.complete = true;
 
-        // House cut
         houseBalance += TOURN_HOUSE;
 
-        // Track tournament wins + NFT badge
         tournamentWins[winner]++;
         playerWins[winner]++;
 
@@ -258,7 +285,6 @@ contract HighClassPong {
             emit NFTBadgeEarned(winner, tournamentWins[winner]);
         }
 
-        // Pay winner
         (bool sent, ) = winner.call{value: TOURN_PAYOUT}("");
         require(sent, "Payout failed");
 
@@ -270,7 +296,7 @@ contract HighClassPong {
     // ════════════════════════════════════════════════════════
 
     /// @notice Withdraw accumulated house fees to owner wallet
-    function withdrawHouse() external onlyOwner {
+    function withdrawHouse() external onlyOwner nonReentrant {
         uint256 amount = houseBalance;
         require(amount > 0, "Nothing to withdraw");
         houseBalance = 0;
