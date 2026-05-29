@@ -440,7 +440,7 @@ function Game({ mode, xp:initXp, tokens:initTok, unlocked:initUnl, tournWins, co
 
     // Detect island on opponent rack
     detectIsland(
-      side === "top" ? tRef.current : bRef.current,
+      side === "top" ? topRef.current : botRef.current,
       pos, side
     );
 
