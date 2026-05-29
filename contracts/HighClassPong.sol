@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.26;
 
 // ═══════════════════════════════════════════════════════════════
 //  HIGHCLASS 🍺 PONG — Smart Contract
@@ -112,6 +112,7 @@ contract HighClassPong {
 
     event NFTBadgeEarned(address indexed player, uint256 tournamentWins);
     event HouseWithdraw(address indexed owner, uint256 amount);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     // ── Modifiers ─────────────────────────────────────────────
     modifier onlyOwner() {
@@ -142,7 +143,7 @@ contract HighClassPong {
     function createMatch() external payable returns (uint256 matchId) {
         require(msg.value == MATCH_BUYIN, "Send exactly 5 CRO");
 
-        matchId = matchCount++;
+        matchId = matchCount; ++matchCount;
         matches[matchId] = Match({
             player1:   msg.sender,
             player2:   address(0),
@@ -187,9 +188,9 @@ contract HighClassPong {
 
         houseBalance += MATCH_HOUSE;
 
-        playerWins[winner]++;
-        playerMatches[m.player1]++;
-        playerMatches[m.player2]++;
+        ++playerWins[winner];
+        ++playerMatches[m.player1];
+        ++playerMatches[m.player2];
 
         (bool sent, ) = winner.call{value: MATCH_PAYOUT}("");
         require(sent, "Payout failed");
@@ -224,7 +225,7 @@ contract HighClassPong {
     function createTournament() external payable returns (uint256 tournId) {
         require(msg.value == TOURN_BUYIN, "Send exactly 10 CRO");
 
-        tournId = tournamentCount++;
+        tournId = tournamentCount; ++tournamentCount;
         Tournament storage t = tournaments[tournId];
         t.players[0]  = msg.sender;
         t.playerCount = 1;
@@ -244,12 +245,12 @@ contract HighClassPong {
         require(t.playerCount < 8,        "Tournament full");
         require(msg.value == TOURN_BUYIN, "Send exactly 10 CRO");
 
-        for (uint256 i = 0; i < t.playerCount; i++) {
+        for (uint256 i = 0; i < t.playerCount; ++i) {
             require(t.players[i] != msg.sender, "Already joined");
         }
 
         t.players[t.playerCount] = msg.sender;
-        t.playerCount++;
+        ++t.playerCount;
         t.pot += msg.value;
 
         emit TournamentJoined(tournId, msg.sender, t.playerCount);
@@ -264,7 +265,7 @@ contract HighClassPong {
         require(t.playerCount == 8,  "Tournament not full");
 
         bool isPlayer = false;
-        for (uint256 i = 0; i < 8; i++) {
+        for (uint256 i = 0; i < 8; ++i) {
             if (t.players[i] == winner) { isPlayer = true; break; }
         }
         require(isPlayer, "Winner not in tournament");
@@ -274,8 +275,8 @@ contract HighClassPong {
 
         houseBalance += TOURN_HOUSE;
 
-        tournamentWins[winner]++;
-        playerWins[winner]++;
+        ++tournamentWins[winner];
+        ++playerWins[winner];
 
         if (
             tournamentWins[winner] >= NFT_WIN_THRESHOLD &&
@@ -310,6 +311,7 @@ contract HighClassPong {
     /// @notice Transfer ownership to a new address
     function transferOwnership(address newOwner) external onlyOwner {
         require(newOwner != address(0), "Invalid address");
+        emit OwnershipTransferred(owner, newOwner);
         owner = newOwner;
     }
 

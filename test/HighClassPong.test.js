@@ -514,6 +514,12 @@ describe("HighClassPong", () => {
         contract.transferOwnership(ethers.ZeroAddress)
       ).to.be.revertedWith("Invalid address");
     });
+
+    it("emits OwnershipTransferred event", async () => {
+      await expect(contract.transferOwnership(p1.address))
+        .to.emit(contract, "OwnershipTransferred")
+        .withArgs(owner.address, p1.address);
+    });
   });
 
   // ──────────────────────────────────────────────────────────
