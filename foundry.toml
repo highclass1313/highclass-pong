@@ -1,0 +1,12 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.20"
+
+[rpc_endpoints]
+cronos         = "${CRONOS_RPC_URL}"
+cronos_testnet = "https://evm-t3.cronos.org"
+
+[etherscan]
+cronos = { key = "${CRONOSCAN_API_KEY}", url = "https://api.cronoscan.com/api" }

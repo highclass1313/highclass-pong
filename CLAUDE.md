@@ -68,6 +68,45 @@ Economic constants (all in CRO/ether units):
 
 The V1 contract is centralized by design (owner resolves results). The inline comment on `resolveMatch` notes that V2 will replace this with verifiable on-chain results.
 
+## Foundry setup
+
+```
+src/HighClassPong.sol   — canonical contract source (promoted from .txt)
+script/Deploy.s.sol     — forge script deployment
+test/HighClassPong.t.sol — full test suite
+foundry.toml            — solc 0.8.20, Cronos RPC + Cronoscan config
+.env.example            — copy to .env and fill in before deploying
+contract-utils.js       — ethers v6 helpers for front-end ↔ contract
+```
+
+**Install Foundry** (one-time): `curl -L https://foundry.paradigm.xyz | bash && foundryup`
+
+**Install forge-std** (required before build/test):
+```bash
+forge install foundry-rs/forge-std --no-commit
+```
+
+**Common commands:**
+```bash
+forge build                                    # compile
+forge test                                     # run all tests
+forge test -vvv                                # verbose (shows traces on failure)
+forge test --match-test test_ResolveMatch      # run a single test
+
+# Deploy to Cronos mainnet
+forge script script/Deploy.s.sol \
+  --rpc-url cronos \
+  --broadcast \
+  --verify
+
+# Deploy to Cronos testnet (no --verify needed)
+forge script script/Deploy.s.sol \
+  --rpc-url cronos_testnet \
+  --broadcast
+```
+
+After deployment, set `HIGHCLASS_PONG_ADDRESS` in `.env` and update `CONTRACT_ADDRESS` in `contract-utils.js`.
+
 ## Token economics (front-end vs on-chain)
 
 The in-game 🪙 tokens shown in the UI are **local state only** — they are not the CRO tokens managed by the smart contract. The wallet connect / CRO betting flow (shown as `🔗 CONNECT WALLET · BET CRO · EARN REWARDS` in the menu) is not yet implemented. When wiring up the contract, the `context` prop passed to `Game` (`"match"` | `"tournament"` | `null`) and the `onEnd` callback are the integration points.
