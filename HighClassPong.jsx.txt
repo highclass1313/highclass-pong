@@ -1161,12 +1161,62 @@ function Tournament({ profile, onBack, onUpdate }) {
   );
 }
 
+// ── Wallet bar ────────────────────────────────────────────────
+const CHAIN_ID = 338; // 25 = Cronos Mainnet · 338 = Cronos Testnet
+
+function WalletBar({ wallet, onConnect, busy, error }) {
+  const wrap = {
+    display:"flex", flexDirection:"column", alignItems:"center",
+    gap:4, marginBottom:10, minHeight:26,
+  };
+  if (!wallet.address) {
+    return (
+      <div style={wrap}>
+        <button
+          onClick={onConnect}
+          disabled={busy}
+          style={{
+            fontSize:9, letterSpacing:2, padding:"6px 14px", borderRadius:6,
+            border:"1px solid #f5c030", background:"transparent", color:"#f5c030",
+            fontFamily:"inherit", cursor: busy ? "wait" : "pointer",
+          }}
+        >
+          {busy ? "CONNECTING…" : "🔗 CONNECT WALLET"}
+        </button>
+        {error && <div style={{ fontSize:8, color:"#e74c3c", letterSpacing:1 }}>{error}</div>}
+      </div>
+    );
+  }
+  const wrongChain = wallet.chainId !== CHAIN_ID;
+  return (
+    <div style={wrap}>
+      <div style={{ fontSize:9, color:"#27ae60", letterSpacing:2 }}>
+        🟢 {wallet.short} {wallet.cro != null && `· ${Number(wallet.cro).toFixed(2)} CRO`}
+      </div>
+      {wrongChain && (
+        <button
+          onClick={onConnect}
+          style={{
+            fontSize:8, letterSpacing:1, padding:"4px 10px", borderRadius:5,
+            border:"1px solid #e74c3c", background:"transparent", color:"#e74c3c",
+            fontFamily:"inherit", cursor:"pointer",
+          }}
+        >
+          ⚠️ WRONG NETWORK — SWITCH TO CRONOS
+        </button>
+      )}
+      {error && <div style={{ fontSize:8, color:"#e74c3c", letterSpacing:1 }}>{error}</div>}
+    </div>
+  );
+}
+
 // ── Menu ──────────────────────────────────────────────────────
-function Menu({ profile, onSelect, onTournament }) {
+function Menu({ profile, onSelect, onTournament, wallet, onConnect, walletBusy, walletError }) {
   const { xp, tokens, unlocked, tournWins } = profile;
   const ri = getRank(xp);
   const r  = RANKS[ri];
   const hasNFT = (tournWins || 0) >= NFT_WINS;
+  const walletReady = !!wallet.address && wallet.chainId === CHAIN_ID;
   return (
     <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 30% 10%,#0f200f,#020702 70%)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Courier New',monospace", color:"#fff", padding:"20px 16px" }}>
       {hasNFT && <div style={{ position:"absolute", top:16, right:16, fontSize:22 }} title="HighClass NFT">🖼️</div>}
@@ -1189,11 +1239,26 @@ function Menu({ profile, onSelect, onTournament }) {
         💥 Solo: 2 shots · 3 in a row = balls back<br />
         👥 2-Player: P1 flicks bottom half · P2 flicks top half
       </div>
+      <WalletBar
+        wallet={wallet}
+        onConnect={onConnect}
+        busy={walletBusy}
+        error={walletError}
+      />
       <div style={{ display:"flex", flexDirection:"column", gap:10, width:"100%", maxWidth:280 }}>
         <Btn onClick={() => onSelect("solo")}  c1="#f5a623" c2="#a05e06" tc="#000">🤖 VS CPU (Free)</Btn>
         <Btn onClick={() => onSelect("multi")} c1="#27ae60" c2="#1a6e3c" tc="#000">👥 2-PLAYER LOCAL (Free)</Btn>
-        <Btn onClick={() => onSelect("match")} c1="#1e6fd4" c2="#0b3480" tc="#fff">🎮 MATCH — {MATCH_BUYIN}🪙</Btn>
-        <Btn onClick={onTournament}            c1="#7b2fa0" c2="#4a1060" tc="#fff">🏆 TOURNAMENT — {TOURN_BUYIN}🪙</Btn>
+        <Btn onClick={() => onSelect("match")} c1="#1e6fd4" c2="#0b3480" tc="#fff" disabled={!walletReady}>
+          🎮 MATCH — {MATCH_BUYIN} CRO
+        </Btn>
+        <Btn onClick={onTournament}            c1="#7b2fa0" c2="#4a1060" tc="#fff" disabled={!walletReady}>
+          🏆 TOURNAMENT — {TOURN_BUYIN} CRO
+        </Btn>
+        {!walletReady && (
+          <div style={{ fontSize:8, color:"#555", letterSpacing:2, textAlign:"center", marginTop:-2 }}>
+            Connect a wallet on Cronos to play for CRO · 18+
+          </div>
+        )}
       </div>
       <div style={{ marginTop:20, display:"flex", flexWrap:"wrap", gap:5, justifyContent:"center", maxWidth:300 }}>
         {ACHIEVEMENTS.map(a => {
@@ -1321,6 +1386,56 @@ export default function App() {
   const [mode,    setMode]    = useState("solo");
   const [profile, setProfile] = useState({ xp:0, tokens:50, unlocked:[], tournWins:0 });
 
+  const [wallet,      setWallet]      = useState({ address:null, chainId:null, short:"", cro:null });
+  const [walletBusy,  setWalletBusy]  = useState(false);
+  const [walletError, setWalletError] = useState(null);
+
+  const refreshBalance = async (w3, address) => {
+    const bal = await w3.getBalance(address);
+    if (bal.ok) setWallet(prev => ({ ...prev, cro: bal.cro }));
+  };
+
+  const handleConnect = async () => {
+    setWalletBusy(true); setWalletError(null);
+    try {
+      const w3 = await import("./src/web3.js");
+      const res = await w3.connect();
+      if (!res.ok) { setWalletError(res.error); return; }
+
+      let chainId = res.chainId;
+      if (chainId !== CHAIN_ID) {
+        const sw = await w3.switchChain(CHAIN_ID);
+        if (!sw.ok) { setWalletError(sw.error); return; }
+        chainId = CHAIN_ID;
+      }
+
+      setWallet({
+        address: res.address,
+        chainId,
+        short: w3.shortAddress(res.address),
+        cro: null,
+      });
+      refreshBalance(w3, res.address);
+
+      // Keep the UI honest if the player switches account or network in
+      // their wallet while the game is open.
+      w3.onWalletChange({
+        onAccounts: (addr) => {
+          if (!addr) setWallet({ address:null, chainId:null, short:"", cro:null });
+          else {
+            setWallet(prev => ({ ...prev, address: addr, short: w3.shortAddress(addr), cro:null }));
+            refreshBalance(w3, addr);
+          }
+        },
+        onChain: (id) => setWallet(prev => ({ ...prev, chainId: id })),
+      });
+    } catch (err) {
+      setWalletError("Could not load wallet library.");
+    } finally {
+      setWalletBusy(false);
+    }
+  };
+
   const updateProfile = (upd) => setProfile(p => ({ ...p, ...upd }));
 
   const handleSelect = (m) => { setMode(m); setScreen("game"); };
@@ -1364,6 +1479,10 @@ export default function App() {
         profile={profile}
         onSelect={handleSelect}
         onTournament={() => setScreen("tournament")}
+        wallet={wallet}
+        onConnect={handleConnect}
+        walletBusy={walletBusy}
+        walletError={walletError}
       />
     </TermsGate>
   );

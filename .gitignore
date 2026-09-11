@@ -2,3 +2,11 @@ node_modules/
 artifacts/
 coverage/
 cache/
+
+# Secrets — NEVER commit. Contains the owner private key.
+.env
+.env.local
+.env.*.local
+
+# Local-chain deployment records (real network records are kept)
+deployments/31337.json

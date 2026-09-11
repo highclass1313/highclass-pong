@@ -2,14 +2,25 @@
   "name": "highclass-pong",
   "version": "1.0.0",
   "private": true,
+  "license": "UNLICENSED",
   "scripts": {
     "test": "npm run test:js && npm run test:contracts",
     "test:js": "jest --coverage",
-    "test:contracts": "node scripts/compile.js && hardhat test --no-compile"
+    "test:contracts": "node scripts/compile.js && hardhat test --no-compile",
+    "compile": "node scripts/compile.js",
+    "deploy:testnet": "node scripts/compile.js && hardhat run scripts/deploy.js --network cronosTestnet --no-compile",
+    "deploy:mainnet": "node scripts/compile.js && hardhat run scripts/deploy.js --network cronos --no-compile",
+    "oracle": "node server/oracle.js",
+    "audit": "slither contracts/HighClassPong.sol && npx solhint contracts/HighClassPong.sol"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "hardhat": "^2.22.0",
-    "jest": "^29.7.0"
+    "jest": "^29.7.0",
+    "solhint": "^5.0.3"
   }
 }
